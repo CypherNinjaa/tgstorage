@@ -2,6 +2,8 @@ package com.tgstorage.data.local
 
 import androidx.room.Database
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.tgstorage.data.local.dao.ChunkDao
 import com.tgstorage.data.local.dao.FileDao
 import com.tgstorage.data.local.dao.MetadataDao
@@ -18,7 +20,7 @@ import com.tgstorage.data.local.entity.SyncStateEntity
         SyncStateEntity::class,
         MetadataEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 abstract class TgStorageDatabase : RoomDatabase() {
@@ -29,5 +31,11 @@ abstract class TgStorageDatabase : RoomDatabase() {
 
     companion object {
         const val DATABASE_NAME = "tgstorage.db"
+
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE chunks ADD COLUMN telegram_file_id TEXT DEFAULT NULL")
+            }
+        }
     }
 }

@@ -1,5 +1,6 @@
 package com.tgstorage.ui.shell
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Icon
@@ -63,9 +64,11 @@ fun AppShell(
             }
         },
     ) { innerPadding ->
-        TgStorageNavGraph(
-            navController = navController,
-            startDestination = startDestination,
-        )
+        Box(modifier = Modifier.padding(innerPadding)) {
+            TgStorageNavGraph(
+                navController = navController,
+                startDestination = startDestination,
+            )
+        }
     }
 }

@@ -21,4 +21,5 @@ object MetadataKeys {
     const val ENCRYPTION_ENABLED = "encryption_enabled"
     const val THEME_MODE = "theme_mode"
     const val DYNAMIC_COLOR = "dynamic_color"
+    const val AUTO_UPLOAD = "auto_upload"
 }

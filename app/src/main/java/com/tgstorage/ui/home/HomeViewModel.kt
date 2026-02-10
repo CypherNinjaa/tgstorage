@@ -6,23 +6,22 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.tgstorage.TgStorageApp
 import com.tgstorage.common.NetworkMonitor
-import com.tgstorage.data.local.entity.FileEntity
-import com.tgstorage.data.local.entity.SyncStateEntity
+import com.tgstorage.data.local.dao.MetadataDao
+import com.tgstorage.data.local.entity.MetadataEntity
+import com.tgstorage.data.local.entity.MetadataKeys
 import com.tgstorage.data.repository.FileRepository
+import com.tgstorage.data.scanner.DeviceFile
+import com.tgstorage.data.scanner.DeviceFileScanner
 import com.tgstorage.data.transfer.TransferManager
 import com.tgstorage.data.transfer.TransferStatus
-import com.tgstorage.data.transfer.TransferType
-import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-// ── File type filter categories ────────────────────────
+// ── Filter categories ──────────────────────────────────
 
 enum class FileFilter(val label: String, val mimePrefix: String?) {
     ALL("All", null),
@@ -32,86 +31,231 @@ enum class FileFilter(val label: String, val mimePrefix: String?) {
     AUDIO("Audio", "audio/"),
 }
 
-// ── View mode toggle ───────────────────────────────────
-
 enum class ViewMode { GRID, LIST }
 
 // ── UI state ───────────────────────────────────────────
 
-data class FileWithSync(
-    val file: FileEntity,
-    val syncStatus: String? = null,
-)
-
 data class HomeUiState(
-    val files: List<FileWithSync> = emptyList(),
+    val deviceFiles: List<DeviceFile> = emptyList(),
     val searchQuery: String = "",
     val activeFilter: FileFilter = FileFilter.ALL,
     val viewMode: ViewMode = ViewMode.LIST,
     val isLoading: Boolean = true,
     val error: String? = null,
     val isOnline: Boolean = true,
-    // Quick upload
+    // Permission
+    val hasPermission: Boolean = false,
+    // Selection
+    val selectionMode: Boolean = false,
+    val selectedIds: Set<Long> = emptySet(),
+    // Auto upload
+    val autoUpload: Boolean = false,
+    // Uploaded tracking — set of file names that have been uploaded
+    val uploadedNames: Set<String> = emptySet(),
+    // Status
+    val message: String? = null,
     val isImporting: Boolean = false,
-    val importedFile: FileEntity? = null,
-    val isUploading: Boolean = false,
-    val uploadMessage: String? = null,
     val activeUploads: Int = 0,
 )
 
 // ── ViewModel ──────────────────────────────────────────
 
-@OptIn(ExperimentalCoroutinesApi::class)
 class HomeViewModel(
+    private val scanner: DeviceFileScanner,
     private val repository: FileRepository,
     private val networkMonitor: NetworkMonitor,
+    private val metadataDao: MetadataDao,
 ) : ViewModel() {
-
-    private val _searchQuery = MutableStateFlow("")
-    private val _activeFilter = MutableStateFlow(FileFilter.ALL)
-    private val _viewMode = MutableStateFlow(ViewMode.LIST)
 
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
+    private var autoUploadJob: Job? = null
+
     init {
-        observeFiles()
         observeNetwork()
         observeTransfers()
+        observeUploadedNames()
+        restoreAutoUpload()
     }
 
-    private fun observeFiles() {
+    /** Restore persisted auto-upload preference */
+    private fun restoreAutoUpload() {
         viewModelScope.launch {
-            combine(_searchQuery, _activeFilter) { query, filter -> query to filter }
-                .flatMapLatest { (query, filter) ->
-                    when {
-                        query.isNotBlank() -> repository.searchFiles(query)
-                        filter.mimePrefix != null -> repository.getFilesByMimePrefix(filter.mimePrefix)
-                        else -> repository.getAllFiles()
-                    }
-                }
-                .catch { e ->
-                    _uiState.update { it.copy(isLoading = false, error = e.message) }
-                }
-                .collect { files ->
-                    val db = TgStorageApp.instance.database
-                    val filesWithSync = files.map { file ->
-                        val sync = db.syncStateDao().getSyncState(file.id)
-                        FileWithSync(file = file, syncStatus = sync?.status)
-                    }
-                    _uiState.update {
-                        it.copy(
-                            files = filesWithSync,
-                            isLoading = false,
-                            error = null,
-                            searchQuery = _searchQuery.value,
-                            activeFilter = _activeFilter.value,
-                            viewMode = _viewMode.value,
-                        )
-                    }
-                }
+            val saved = metadataDao.getValue(MetadataKeys.AUTO_UPLOAD)
+            if (saved == "true") {
+                _uiState.update { it.copy(autoUpload = true) }
+                // Don't restart auto-upload job — only on explicit toggle
+            }
         }
     }
+
+    // ── Permission ─────────────────────────────────────
+
+    fun onPermissionGranted() {
+        _uiState.update { it.copy(hasPermission = true) }
+        loadDeviceFiles()
+    }
+
+    fun onPermissionDenied() {
+        _uiState.update {
+            it.copy(hasPermission = false, isLoading = false,
+                error = "Storage permission is required to show your files")
+        }
+    }
+
+    // ── Load device files ──────────────────────────────
+
+    fun loadDeviceFiles() {
+        _uiState.update { it.copy(isLoading = true, error = null) }
+        viewModelScope.launch {
+            try {
+                val state = _uiState.value
+                val files = scanner.scanFiles(
+                    mimeFilter = state.activeFilter.mimePrefix,
+                    searchQuery = state.searchQuery.takeIf { it.isNotBlank() },
+                )
+                _uiState.update { it.copy(deviceFiles = files, isLoading = false, error = null) }
+            } catch (e: Exception) {
+                _uiState.update { it.copy(isLoading = false, error = "Failed to scan: ${e.message}") }
+            }
+        }
+    }
+
+    fun onSearchQueryChange(query: String) {
+        _uiState.update { it.copy(searchQuery = query) }
+        loadDeviceFiles()
+    }
+
+    fun onFilterChange(filter: FileFilter) {
+        _uiState.update { it.copy(activeFilter = filter) }
+        loadDeviceFiles()
+    }
+
+    fun onViewModeToggle() {
+        val next = if (_uiState.value.viewMode == ViewMode.GRID) ViewMode.LIST else ViewMode.GRID
+        _uiState.update { it.copy(viewMode = next) }
+    }
+
+    fun refresh() {
+        loadDeviceFiles()
+    }
+
+    // ── Selection ──────────────────────────────────────
+
+    fun toggleSelection(fileId: Long) {
+        _uiState.update { state ->
+            val newSelected = state.selectedIds.toMutableSet()
+            if (fileId in newSelected) newSelected.remove(fileId) else newSelected.add(fileId)
+            state.copy(selectedIds = newSelected, selectionMode = newSelected.isNotEmpty())
+        }
+    }
+
+    fun selectAll() {
+        _uiState.update { state ->
+            state.copy(selectedIds = state.deviceFiles.map { it.id }.toSet(), selectionMode = true)
+        }
+    }
+
+    fun clearSelection() {
+        _uiState.update { it.copy(selectedIds = emptySet(), selectionMode = false) }
+    }
+
+    // ── Upload selected files ──────────────────────────
+
+    fun uploadSelected() {
+        val state = _uiState.value
+        val selected = state.deviceFiles.filter { it.id in state.selectedIds }
+        if (selected.isEmpty()) return
+
+        _uiState.update { it.copy(isImporting = true, message = null, selectionMode = false, selectedIds = emptySet()) }
+
+        viewModelScope.launch {
+            var ok = 0; var fail = 0
+            for (file in selected) {
+                // Skip already-uploaded files
+                if (file.name in state.uploadedNames) { ok++; continue }
+
+                repository.importFile(file.contentUri)
+                    .onSuccess { entity -> ok++; TransferManager.enqueueUpload(entity) }
+                    .onFailure { fail++ }
+            }
+            _uiState.update {
+                it.copy(
+                    isImporting = false,
+                    message = when {
+                        fail == 0 -> "$ok file(s) queued for upload!"
+                        ok == 0 -> "Failed to import $fail file(s)"
+                        else -> "$ok queued, $fail failed"
+                    },
+                )
+            }
+        }
+    }
+
+    // ── Auto upload toggle ─────────────────────────────
+
+    fun toggleAutoUpload() {
+        val newValue = !_uiState.value.autoUpload
+        _uiState.update { it.copy(autoUpload = newValue) }
+
+        // Persist to Room so it survives screen switches
+        viewModelScope.launch {
+            metadataDao.setValue(MetadataEntity(MetadataKeys.AUTO_UPLOAD, newValue.toString()))
+        }
+
+        if (newValue) {
+            // Start uploading all non-uploaded device files
+            startAutoUpload()
+        } else {
+            autoUploadJob?.cancel()
+            autoUploadJob = null
+            _uiState.update { it.copy(message = "Auto-upload stopped") }
+        }
+    }
+
+    private fun startAutoUpload() {
+        autoUploadJob?.cancel()
+        autoUploadJob = viewModelScope.launch {
+            val state = _uiState.value
+            val toUpload = state.deviceFiles.filter { it.name !in state.uploadedNames }
+
+            if (toUpload.isEmpty()) {
+                _uiState.update { it.copy(message = "All files already uploaded!") }
+                return@launch
+            }
+
+            _uiState.update {
+                it.copy(isImporting = true, message = "Auto-uploading ${toUpload.size} file(s)…")
+            }
+
+            var ok = 0; var fail = 0
+            for (file in toUpload) {
+                if (!_uiState.value.autoUpload) break // User turned off
+
+                repository.importFile(file.contentUri)
+                    .onSuccess { entity -> ok++; TransferManager.enqueueUpload(entity) }
+                    .onFailure { fail++ }
+            }
+
+            _uiState.update {
+                it.copy(
+                    isImporting = false,
+                    message = when {
+                        fail == 0 -> "$ok file(s) queued for auto-upload!"
+                        ok == 0 -> "Failed to import $fail file(s)"
+                        else -> "$ok queued, $fail failed"
+                    },
+                )
+            }
+        }
+    }
+
+    fun clearMessage() {
+        _uiState.update { it.copy(message = null) }
+    }
+
+    // ── Observers ──────────────────────────────────────
 
     private fun observeNetwork() {
         viewModelScope.launch {
@@ -132,107 +276,12 @@ class HomeViewModel(
         }
     }
 
-    fun onSearchQueryChange(query: String) {
-        _searchQuery.value = query
-        _uiState.update { it.copy(searchQuery = query) }
-    }
-
-    fun onFilterChange(filter: FileFilter) {
-        _activeFilter.value = filter
-        _uiState.update { it.copy(activeFilter = filter) }
-    }
-
-    fun onViewModeToggle() {
-        val next = if (_viewMode.value == ViewMode.GRID) ViewMode.LIST else ViewMode.GRID
-        _viewMode.value = next
-        _uiState.update { it.copy(viewMode = next) }
-    }
-
-    fun refresh() {
-        _uiState.update { it.copy(isLoading = true, error = null) }
-        val currentQuery = _searchQuery.value
-        _searchQuery.value = currentQuery
-    }
-
-    // ── Quick file import + upload ─────────────────────
-
-    /**
-     * Import a file from a content URI directly from the Home screen.
-     * If [autoUpload] is true, also enqueue it for Telegram upload.
-     */
-    fun quickImportFile(uri: Uri, autoUpload: Boolean = false) {
-        _uiState.update { it.copy(isImporting = true, uploadMessage = null) }
-
+    /** Observe Room for uploaded file names — updates green ticks in real time */
+    private fun observeUploadedNames() {
         viewModelScope.launch {
-            repository.importFile(uri)
-                .onSuccess { file ->
-                    _uiState.update {
-                        it.copy(
-                            isImporting = false,
-                            importedFile = file,
-                            uploadMessage = "\"${file.name}\" added!",
-                        )
-                    }
-                    if (autoUpload) {
-                        uploadFile(file)
-                    }
-                }
-                .onFailure { e ->
-                    _uiState.update {
-                        it.copy(
-                            isImporting = false,
-                            uploadMessage = "Import failed: ${e.message}",
-                        )
-                    }
-                }
-        }
-    }
-
-    /**
-     * Import multiple files at once.
-     */
-    fun quickImportMultiple(uris: List<Uri>, autoUpload: Boolean = false) {
-        _uiState.update { it.copy(isImporting = true, uploadMessage = null) }
-
-        viewModelScope.launch {
-            var successCount = 0
-            var failCount = 0
-            uris.forEach { uri ->
-                repository.importFile(uri)
-                    .onSuccess { file ->
-                        successCount++
-                        if (autoUpload) uploadFile(file)
-                    }
-                    .onFailure { failCount++ }
+            repository.getUploadedFileNames().collect { names ->
+                _uiState.update { it.copy(uploadedNames = names.toSet()) }
             }
-            _uiState.update {
-                it.copy(
-                    isImporting = false,
-                    uploadMessage = when {
-                        failCount == 0 -> "$successCount file(s) added!"
-                        successCount == 0 -> "Failed to import $failCount file(s)"
-                        else -> "$successCount added, $failCount failed"
-                    },
-                )
-            }
-        }
-    }
-
-    /**
-     * Upload a file that's already in the Room DB to Telegram.
-     */
-    fun uploadFile(file: FileEntity) {
-        TransferManager.enqueueUpload(file)
-        _uiState.update { it.copy(uploadMessage = "Uploading \"${file.name}\"…") }
-    }
-
-    fun clearMessage() {
-        _uiState.update { it.copy(uploadMessage = null, importedFile = null) }
-    }
-
-    fun deleteFile(file: FileEntity) {
-        viewModelScope.launch {
-            repository.deleteFile(file)
         }
     }
 
@@ -244,9 +293,11 @@ class HomeViewModel(
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 val app = TgStorageApp.instance
                 val db = app.database
+                val scanner = DeviceFileScanner(app)
                 val repository = FileRepository(app, db.fileDao(), db.syncStateDao())
                 val networkMonitor = NetworkMonitor(app)
-                return HomeViewModel(repository, networkMonitor) as T
+                val metadataDao = db.metadataDao()
+                return HomeViewModel(scanner, repository, networkMonitor, metadataDao) as T
             }
         }
     }

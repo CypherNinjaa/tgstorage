@@ -34,6 +34,12 @@ class FileRepository(
     fun getFileCount(): Flow<Int> =
         fileDao.getFileCount()
 
+    fun getUploadedFileNames(): Flow<List<String>> =
+        fileDao.getUploadedFileNames()
+
+    fun getUploadedFiles(): Flow<List<FileEntity>> =
+        fileDao.getUploadedFiles()
+
     suspend fun getFileById(id: Long): FileEntity? =
         fileDao.getFileById(id)
 

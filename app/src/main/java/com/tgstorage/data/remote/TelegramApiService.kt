@@ -6,12 +6,16 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.Response
+import okio.BufferedSink
+import okio.source
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -24,21 +28,22 @@ import kotlin.coroutines.resumeWithException
  */
 class TelegramApiService {
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .writeTimeout(120, TimeUnit.SECONDS)
-        .build()
-
-    private val json = Json {
-        ignoreUnknownKeys = true
-        isLenient = true
-    }
-
     companion object {
         private const val BASE_URL = "https://api.telegram.org/bot"
         private const val FILE_URL = "https://api.telegram.org/file/bot"
+
+        /** Shared OkHttpClient — reuses connections, thread pools, TLS sessions */
+        val sharedClient: OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
     }
+
+    private val client: OkHttpClient get() = sharedClient
+
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     /**
      * GET /getMe — validates the token and returns bot info.
@@ -100,16 +105,22 @@ class TelegramApiService {
         chatId: String,
         file: File,
         fileName: String = file.name,
+        onProgress: ((bytesWritten: Long, totalBytes: Long) -> Unit)? = null,
     ): Result<TelegramMessage> = withContext(Dispatchers.IO) {
         runCatching {
+            val fileBody: RequestBody = if (onProgress != null) {
+                CountingRequestBody(
+                    delegate = file.asRequestBody("application/octet-stream".toMediaType()),
+                    onProgress = onProgress,
+                )
+            } else {
+                file.asRequestBody("application/octet-stream".toMediaType())
+            }
+
             val requestBody = MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
                 .addFormDataPart("chat_id", chatId)
-                .addFormDataPart(
-                    "document",
-                    fileName,
-                    file.asRequestBody("application/octet-stream".toMediaType()),
-                )
+                .addFormDataPart("document", fileName, fileBody)
                 .build()
 
             val request = Request.Builder()
@@ -194,3 +205,40 @@ class TelegramApiException(
     message: String,
     val errorCode: Int? = null,
 ) : Exception(message)
+
+/**
+ * A [RequestBody] wrapper that reports upload progress via [onProgress].
+ * Wraps the delegate body and counts bytes written to the sink.
+ */
+class CountingRequestBody(
+    private val delegate: RequestBody,
+    private val onProgress: (bytesWritten: Long, totalBytes: Long) -> Unit,
+) : RequestBody() {
+
+    override fun contentType(): MediaType? = delegate.contentType()
+
+    override fun contentLength(): Long = delegate.contentLength()
+
+    override fun writeTo(sink: BufferedSink) {
+        val total = contentLength()
+        val countingSink = CountingSink(sink, total, onProgress)
+        val bufferedSink = okio.buffer(countingSink)
+        delegate.writeTo(bufferedSink)
+        bufferedSink.flush()
+    }
+}
+
+private class CountingSink(
+    delegate: okio.Sink,
+    private val total: Long,
+    private val onProgress: (bytesWritten: Long, totalBytes: Long) -> Unit,
+) : okio.ForwardingSink(delegate) {
+
+    private var bytesWritten = 0L
+
+    override fun write(source: okio.Buffer, byteCount: Long) {
+        super.write(source, byteCount)
+        bytesWritten += byteCount
+        onProgress(bytesWritten, total)
+    }
+}

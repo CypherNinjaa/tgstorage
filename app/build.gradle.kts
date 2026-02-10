@@ -81,4 +81,7 @@ dependencies {
     // Networking
     implementation(libs.okhttp)
     implementation(libs.kotlinx.serialization.json)
+
+    // Image loading
+    implementation(libs.coil.compose)
 }

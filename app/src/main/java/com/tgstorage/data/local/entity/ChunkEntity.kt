@@ -31,6 +31,9 @@ data class ChunkEntity(
     @ColumnInfo(name = "telegram_message_id")
     val telegramMessageId: Long? = null,
 
+    @ColumnInfo(name = "telegram_file_id")
+    val telegramFileId: String? = null,
+
     @ColumnInfo(name = "checksum")
     val checksum: String = "",
 

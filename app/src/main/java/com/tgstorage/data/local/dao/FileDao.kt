@@ -35,4 +35,10 @@ interface FileDao {
 
     @Query("SELECT COUNT(*) FROM files")
     fun getFileCount(): Flow<Int>
+
+    @Query("SELECT f.name FROM files f INNER JOIN sync_state s ON f.id = s.file_id WHERE s.status = 'uploaded'")
+    fun getUploadedFileNames(): Flow<List<String>>
+
+    @Query("SELECT f.* FROM files f INNER JOIN sync_state s ON f.id = s.file_id WHERE s.status = 'uploaded' ORDER BY f.updated_at DESC")
+    fun getUploadedFiles(): Flow<List<FileEntity>>
 }

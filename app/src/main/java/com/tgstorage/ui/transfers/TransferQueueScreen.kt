@@ -1,7 +1,9 @@
 package com.tgstorage.ui.transfers
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,13 +15,21 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.VideoFile
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.outlined.CloudDone
 import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -31,6 +41,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -39,10 +51,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.tgstorage.data.local.entity.FileEntity
 import com.tgstorage.data.transfer.TransferProgress
 import com.tgstorage.data.transfer.TransferStatus
 import com.tgstorage.data.transfer.TransferType
@@ -51,87 +65,267 @@ import com.tgstorage.ui.components.EmptyState
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TransferQueueScreen(
-    viewModel: TransferQueueViewModel = viewModel(),
+    viewModel: TransferQueueViewModel = viewModel(factory = TransferQueueViewModel.Factory),
 ) {
-    val transfers by viewModel.transfers.collectAsState()
+    val state by viewModel.uiState.collectAsState()
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Transfers") },
                 actions = {
-                    if (transfers.any { !viewModel.isActive(it) }) {
+                    if (state.selectedTab == 0 && state.transfers.any { !viewModel.isActive(it) }) {
                         IconButton(onClick = viewModel::clearFinished) {
-                            Icon(
-                                Icons.Filled.DeleteSweep,
-                                contentDescription = "Clear finished",
-                            )
+                            Icon(Icons.Filled.DeleteSweep, "Clear finished")
                         }
                     }
                 },
             )
         },
     ) { padding ->
-        if (transfers.isEmpty()) {
-            EmptyState(
-                icon = Icons.Outlined.SwapVert,
-                title = "No transfers",
-                subtitle = "Your uploads and downloads will appear here",
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-            )
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-                    .padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                // Active transfers section
-                val active = transfers.filter { viewModel.isActive(it) }
-                if (active.isNotEmpty()) {
-                    item {
-                        Text(
-                            text = "Active",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(top = 8.dp),
-                        )
-                    }
-                    items(active, key = { it.fileId }) { transfer ->
-                        TransferCard(
-                            progress = transfer,
-                            onCancel = { viewModel.cancelTransfer(transfer.fileId, transfer.type) },
-                        )
-                    }
-                }
+        Column(
+            modifier = Modifier.fillMaxSize().padding(padding),
+        ) {
+            // ── Tab bar ─────────────────────────────────
+            TabRow(selectedTabIndex = state.selectedTab) {
+                Tab(
+                    selected = state.selectedTab == 0,
+                    onClick = { viewModel.selectTab(0) },
+                    text = {
+                        val count = state.transfers.size
+                        Text(if (count > 0) "Transfers ($count)" else "Transfers")
+                    },
+                )
+                Tab(
+                    selected = state.selectedTab == 1,
+                    onClick = { viewModel.selectTab(1) },
+                    text = {
+                        val count = state.uploadedFiles.size
+                        Text(if (count > 0) "Uploaded ($count)" else "Uploaded")
+                    },
+                )
+            }
 
-                // Finished transfers section
-                val finished = transfers.filter { !viewModel.isActive(it) }
-                if (finished.isNotEmpty()) {
-                    item {
-                        Text(
-                            text = "Completed",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(top = 8.dp),
-                        )
-                    }
-                    items(finished, key = { it.fileId }) { transfer ->
-                        TransferCard(
-                            progress = transfer,
-                            onCancel = null,
-                        )
-                    }
-                }
-
-                item { Spacer(modifier = Modifier.height(80.dp)) }
+            // ── Tab content ─────────────────────────────
+            when (state.selectedTab) {
+                0 -> TransfersTab(
+                    transfers = state.transfers,
+                    isActive = viewModel::isActive,
+                    onCancel = { viewModel.cancelTransfer(it.fileId, it.type) },
+                )
+                1 -> UploadedTab(
+                    files = state.uploadedFiles,
+                    onDownload = viewModel::enqueueDownload,
+                )
             }
         }
     }
 }
+
+// ─── Transfers tab ─────────────────────────────────────
+
+@Composable
+private fun TransfersTab(
+    transfers: List<TransferProgress>,
+    isActive: (TransferProgress) -> Boolean,
+    onCancel: (TransferProgress) -> Unit,
+) {
+    if (transfers.isEmpty()) {
+        EmptyState(
+            icon = Icons.Outlined.SwapVert,
+            title = "No transfers",
+            subtitle = "Your uploads and downloads will appear here",
+            modifier = Modifier.fillMaxSize(),
+        )
+    } else {
+        val active = transfers.filter { isActive(it) }
+        val finished = transfers.filter { !isActive(it) }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            // ── Global progress summary ────────────────
+            if (active.isNotEmpty()) {
+                item(key = "global_progress") {
+                    GlobalProgressCard(activeTransfers = active)
+                }
+            }
+
+            if (active.isNotEmpty()) {
+                item {
+                    Text("Active", style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
+                }
+                items(active, key = { "${it.fileId}_${it.type}" }) { transfer ->
+                    TransferCard(progress = transfer, onCancel = { onCancel(transfer) })
+                }
+            }
+
+            if (finished.isNotEmpty()) {
+                item {
+                    Text("Completed", style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp))
+                }
+                items(finished, key = { "${it.fileId}_${it.type}_done" }) { transfer ->
+                    TransferCard(progress = transfer, onCancel = null)
+                }
+            }
+
+            item { Spacer(Modifier.height(80.dp)) }
+        }
+    }
+}
+
+// ─── Global progress card ──────────────────────────────
+
+@Composable
+private fun GlobalProgressCard(activeTransfers: List<TransferProgress>) {
+    val totalBytes = activeTransfers.sumOf { it.totalBytes }
+    val transferred = activeTransfers.sumOf { it.bytesTransferred }
+    val fraction = if (totalBytes > 0) transferred.toFloat() / totalBytes else 0f
+    val percent = (fraction * 100).toInt()
+    val completedCount = activeTransfers.count { it.status == TransferStatus.IN_PROGRESS && it.bytesTransferred >= it.totalBytes && it.totalBytes > 0 }
+    val uploadCount = activeTransfers.count { it.type == TransferType.UPLOAD }
+    val downloadCount = activeTransfers.count { it.type == TransferType.DOWNLOAD }
+
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.CloudUpload, null, Modifier.size(28.dp),
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        buildString {
+                            if (uploadCount > 0) append("Uploading $uploadCount file(s)")
+                            if (downloadCount > 0) {
+                                if (uploadCount > 0) append(" • ")
+                                append("Downloading $downloadCount")
+                            }
+                        },
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                    Text(
+                        "${formatSize(transferred)} / ${formatSize(totalBytes)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                    )
+                }
+                // Big percentage
+                Text(
+                    "$percent%",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            // Progress bar
+            Box(
+                modifier = Modifier.fillMaxWidth().height(8.dp)
+                    .background(
+                        MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.12f),
+                        RoundedCornerShape(4.dp),
+                    ),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fraction.coerceIn(0f, 1f))
+                        .height(8.dp)
+                        .background(
+                            MaterialTheme.colorScheme.onPrimaryContainer,
+                            RoundedCornerShape(4.dp),
+                        ),
+                )
+            }
+        }
+    }
+}
+
+// ─── Uploaded tab ──────────────────────────────────────
+
+@Composable
+private fun UploadedTab(
+    files: List<FileEntity>,
+    onDownload: (FileEntity) -> Unit,
+) {
+    if (files.isEmpty()) {
+        EmptyState(
+            icon = Icons.Outlined.CloudDone,
+            title = "No uploaded files",
+            subtitle = "Files you upload to Telegram will appear here",
+            modifier = Modifier.fillMaxSize(),
+        )
+    } else {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            item {
+                Text("${files.size} file(s) in Telegram cloud",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
+            }
+            items(files, key = { it.id }) { file ->
+                UploadedFileCard(file = file, onDownload = { onDownload(file) })
+            }
+            item { Spacer(Modifier.height(80.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun UploadedFileCard(
+    file: FileEntity,
+    onDownload: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                fileMimeIcon(file.mimeType), null, Modifier.size(40.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(file.name, style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis)
+                Text(formatSize(file.size), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            IconButton(onClick = onDownload) {
+                Icon(Icons.Filled.Download, "Download",
+                    tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+}
+
+private fun fileMimeIcon(mimeType: String): ImageVector = when {
+    mimeType.startsWith("image/") -> Icons.Filled.Image
+    mimeType.startsWith("video/") -> Icons.Filled.VideoFile
+    mimeType.startsWith("audio/") -> Icons.Filled.AudioFile
+    mimeType.startsWith("application/pdf") || mimeType.startsWith("text/") -> Icons.Filled.Description
+    else -> Icons.AutoMirrored.Filled.InsertDriveFile
+}
+
+// ─── Transfer card ─────────────────────────────────────
 
 @Composable
 private fun TransferCard(
@@ -139,88 +333,54 @@ private fun TransferCard(
     onCancel: (() -> Unit)?,
 ) {
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .animateContentSize(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-        ),
+        modifier = Modifier.fillMaxWidth().animateContentSize(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    imageVector = if (progress.type == TransferType.UPLOAD) {
-                        Icons.Filled.CloudUpload
-                    } else {
-                        Icons.Filled.CloudDownload
-                    },
-                    contentDescription = null,
-                    modifier = Modifier.size(24.dp),
-                    tint = MaterialTheme.colorScheme.primary,
+                    if (progress.type == TransferType.UPLOAD) Icons.Filled.CloudUpload
+                    else Icons.Filled.CloudDownload,
+                    null, Modifier.size(24.dp), MaterialTheme.colorScheme.primary,
                 )
-                Spacer(modifier = Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(progress.fileName, style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        text = progress.fileName,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = "${progress.type.name.lowercase().replaceFirstChar { it.uppercase() }} • ${formatSize(progress.totalBytes)}",
+                        "${progress.type.name.lowercase().replaceFirstChar { it.uppercase() }} • ${formatSize(progress.totalBytes)}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-
                 StatusChip(progress.status)
             }
 
-            // Progress bar for active transfers
             if (progress.status == TransferStatus.IN_PROGRESS || progress.status == TransferStatus.PENDING) {
-                Spacer(modifier = Modifier.height(12.dp))
-                val fraction = if (progress.totalBytes > 0) {
-                    progress.bytesTransferred.toFloat() / progress.totalBytes
-                } else 0f
-
-                LinearProgressIndicator(
-                    progress = { fraction },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text(
-                        text = "Chunk ${progress.currentChunk}/${progress.totalChunks}",
-                        style = MaterialTheme.typography.labelSmall,
-                    )
-                    Text(
-                        text = "${(fraction * 100).toInt()}%",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                    )
+                Spacer(Modifier.height(12.dp))
+                val fraction = if (progress.totalBytes > 0)
+                    progress.bytesTransferred.toFloat() / progress.totalBytes else 0f
+                LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(4.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Chunk ${progress.currentChunk}/${progress.totalChunks}",
+                        style = MaterialTheme.typography.labelSmall)
+                    Text("${(fraction * 100).toInt()}%",
+                        style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                 }
             }
 
-            // Error message
             if (progress.status == TransferStatus.FAILED && progress.error != null) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = progress.error,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
+                Spacer(Modifier.height(8.dp))
+                Text(progress.error, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error)
             }
 
-            // Cancel button
             if (onCancel != null) {
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(Modifier.height(8.dp))
                 TextButton(onClick = onCancel) {
-                    Icon(Icons.Filled.Cancel, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(Icons.Filled.Cancel, null, Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
                     Text("Cancel")
                 }
             }
@@ -238,25 +398,18 @@ private fun StatusChip(status: TransferStatus) {
         TransferStatus.FAILED -> "Failed" to MaterialTheme.colorScheme.error
         TransferStatus.CANCELLED -> "Cancelled" to MaterialTheme.colorScheme.outline
     }
-
     val icon = when (status) {
         TransferStatus.COMPLETED -> Icons.Filled.CheckCircle
         TransferStatus.FAILED -> Icons.Filled.Error
         TransferStatus.CANCELLED -> Icons.Filled.Cancel
         else -> null
     }
-
     AssistChip(
         onClick = {},
         label = { Text(label, style = MaterialTheme.typography.labelSmall) },
-        leadingIcon = icon?.let {
-            {
-                Icon(it, contentDescription = null, modifier = Modifier.size(16.dp))
-            }
-        },
+        leadingIcon = icon?.let { { Icon(it, null, Modifier.size(16.dp)) } },
         colors = AssistChipDefaults.assistChipColors(
-            labelColor = color,
-            leadingIconContentColor = color,
+            labelColor = color, leadingIconContentColor = color,
         ),
     )
 }

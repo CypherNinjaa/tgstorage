@@ -9,8 +9,6 @@ import com.tgstorage.data.remote.TelegramApiService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
@@ -46,15 +44,16 @@ class ChunkManager(
     private val syncStateDao: SyncStateDao,
 ) {
     companion object {
-        const val DEFAULT_CHUNK_SIZE = 20L * 1024 * 1024 // 20 MB
+        const val DEFAULT_CHUNK_SIZE = 20L * 1024 * 1024          // 20 MB
+        private const val SMALL_FILE_THRESHOLD = 49L * 1024 * 1024 // 49 MB — under Bot API 50 MB limit
         private const val MAX_RETRIES = 3
         private const val INITIAL_BACKOFF_MS = 1000L
     }
 
     /**
-     * Uploads a file in chunks to Telegram. For files under 50 MB,
-     * uploads as a single document. For larger files, splits into chunks.
-     * Emits progress to [progressFlow].
+     * Uploads a file to Telegram.
+     * - Small files (< 49 MB): upload directly in one shot — no chunk splitting.
+     * - Large files: split into 20 MB chunks with resume support.
      */
     suspend fun uploadFile(
         token: String,
@@ -66,107 +65,17 @@ class ChunkManager(
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val fileSize = localFile.length()
-            val chunkSize = DEFAULT_CHUNK_SIZE
-            val totalChunks = ((fileSize + chunkSize - 1) / chunkSize).toInt()
 
-            progressFlow.value = progressFlow.value.copy(
-                totalChunks = totalChunks,
-                totalBytes = fileSize,
-                status = TransferStatus.IN_PROGRESS,
-            )
-
-            // Check for already-uploaded chunks (resume support)
-            val existingChunks = chunkDao.getChunksForFileSync(fileId)
-            val uploadedIndices = existingChunks
-                .filter { it.telegramMessageId != null }
-                .map { it.chunkIndex }
-                .toSet()
-
-            var bytesUploaded = existingChunks
-                .filter { it.telegramMessageId != null }
-                .sumOf { it.size }
-
-            val tempDir = File(localFile.parentFile, "chunks_temp")
-            if (!tempDir.exists()) tempDir.mkdirs()
-
-            for (chunkIndex in 0 until totalChunks) {
-                // Skip already uploaded chunks
-                if (chunkIndex in uploadedIndices) {
-                    progressFlow.value = progressFlow.value.copy(
-                        currentChunk = chunkIndex + 1,
-                        bytesTransferred = bytesUploaded,
-                    )
-                    continue
-                }
-
-                // Check for cancellation
-                if (progressFlow.value.status == TransferStatus.CANCELLED) {
-                    throw CancellationException("Upload cancelled")
-                }
-
-                val offset = chunkIndex.toLong() * chunkSize
-                val thisChunkSize = minOf(chunkSize, fileSize - offset).toInt()
-
-                // Split chunk to temp file
-                val chunkFile = File(tempDir, "${localFile.name}.chunk$chunkIndex")
-                splitChunk(localFile, chunkFile, offset, thisChunkSize)
-                val chunkChecksum = computeSha256(chunkFile)
-
-                // Upload with retry + backoff
-                val message = retryWithBackoff(MAX_RETRIES) {
-                    api.sendDocument(
-                        token = token,
-                        chatId = chatId,
-                        file = chunkFile,
-                        fileName = if (totalChunks == 1) fileName
-                        else "${fileName}.part${chunkIndex + 1}of$totalChunks",
-                    ).getOrThrow()
-                }
-
-                // Store chunk metadata in Room
-                chunkDao.insertChunk(
-                    ChunkEntity(
-                        fileId = fileId,
-                        chunkIndex = chunkIndex,
-                        telegramMessageId = message.messageId,
-                        checksum = chunkChecksum,
-                        size = thisChunkSize.toLong(),
-                    )
-                )
-
-                // Clean up temp chunk
-                chunkFile.delete()
-
-                bytesUploaded += thisChunkSize
-                progressFlow.value = progressFlow.value.copy(
-                    currentChunk = chunkIndex + 1,
-                    bytesTransferred = bytesUploaded,
-                )
+            if (fileSize <= SMALL_FILE_THRESHOLD) {
+                uploadSmallFile(token, chatId, fileId, localFile, fileName, fileSize, progressFlow)
+            } else {
+                uploadLargeFile(token, chatId, fileId, localFile, fileName, fileSize, progressFlow)
             }
-
-            // Mark sync state as uploaded
-            val existingSync = syncStateDao.getSyncState(fileId)
-            syncStateDao.insertOrUpdate(
-                (existingSync ?: SyncStateEntity(fileId = fileId)).copy(
-                    status = SyncStatus.UPLOADED,
-                    lastAttempt = System.currentTimeMillis(),
-                )
-            )
-
-            // Cleanup temp dir
-            tempDir.deleteRecursively()
-
-            progressFlow.value = progressFlow.value.copy(
-                status = TransferStatus.COMPLETED,
-            )
         }.onFailure { e ->
             if (e !is CancellationException) {
                 syncStateDao.getSyncState(fileId)?.let { sync ->
                     syncStateDao.insertOrUpdate(
-                        sync.copy(
-                            status = SyncStatus.FAILED,
-                            lastAttempt = System.currentTimeMillis(),
-                        )
+                        sync.copy(status = SyncStatus.FAILED, lastAttempt = System.currentTimeMillis())
                     )
                 }
             }
@@ -176,6 +85,162 @@ class ChunkManager(
                 error = e.message,
             )
         }
+    }
+
+    /** Direct single-shot upload — no temp files, no chunking. */
+    private suspend fun uploadSmallFile(
+        token: String,
+        chatId: String,
+        fileId: Long,
+        localFile: File,
+        fileName: String,
+        fileSize: Long,
+        progressFlow: MutableStateFlow<TransferProgress>,
+    ) {
+        progressFlow.value = progressFlow.value.copy(
+            totalChunks = 1,
+            totalBytes = fileSize,
+            status = TransferStatus.IN_PROGRESS,
+        )
+
+        // Upload directly — no copy needed
+        val message = retryWithBackoff(MAX_RETRIES) {
+            api.sendDocument(
+                token = token, chatId = chatId, file = localFile, fileName = fileName,
+                onProgress = { bytesWritten, totalBytes ->
+                    progressFlow.value = progressFlow.value.copy(
+                        currentChunk = 0,
+                        bytesTransferred = bytesWritten,
+                        totalBytes = if (totalBytes > 0) totalBytes else fileSize,
+                    )
+                },
+            ).getOrThrow()
+        }
+
+        // Store single chunk record with Telegram file_id for downloads
+        val telegramFileId = message.document?.fileId
+        chunkDao.insertChunk(
+            ChunkEntity(
+                fileId = fileId,
+                chunkIndex = 0,
+                telegramMessageId = message.messageId,
+                telegramFileId = telegramFileId,
+                checksum = computeSha256(localFile),
+                size = fileSize,
+            )
+        )
+
+        // Mark as uploaded
+        markUploaded(fileId)
+
+        progressFlow.value = progressFlow.value.copy(
+            currentChunk = 1,
+            bytesTransferred = fileSize,
+            status = TransferStatus.COMPLETED,
+        )
+    }
+
+    /** Chunked upload for large files with resume support. */
+    private suspend fun uploadLargeFile(
+        token: String,
+        chatId: String,
+        fileId: Long,
+        localFile: File,
+        fileName: String,
+        fileSize: Long,
+        progressFlow: MutableStateFlow<TransferProgress>,
+    ) {
+        val chunkSize = DEFAULT_CHUNK_SIZE
+        val totalChunks = ((fileSize + chunkSize - 1) / chunkSize).toInt()
+
+        progressFlow.value = progressFlow.value.copy(
+            totalChunks = totalChunks,
+            totalBytes = fileSize,
+            status = TransferStatus.IN_PROGRESS,
+        )
+
+        // Resume: check already-uploaded chunks
+        val existingChunks = chunkDao.getChunksForFileSync(fileId)
+        val uploadedIndices = existingChunks
+            .filter { it.telegramMessageId != null }
+            .map { it.chunkIndex }
+            .toSet()
+        var bytesUploaded = existingChunks
+            .filter { it.telegramMessageId != null }
+            .sumOf { it.size }
+
+        // Use unique temp dir per file to avoid race conditions
+        val tempDir = File(localFile.parentFile, "chunks_${fileId}")
+        if (!tempDir.exists()) tempDir.mkdirs()
+
+        try {
+            for (chunkIndex in 0 until totalChunks) {
+                if (chunkIndex in uploadedIndices) {
+                    progressFlow.value = progressFlow.value.copy(
+                        currentChunk = chunkIndex + 1,
+                        bytesTransferred = bytesUploaded,
+                    )
+                    continue
+                }
+
+                if (progressFlow.value.status == TransferStatus.CANCELLED) {
+                    throw CancellationException("Upload cancelled")
+                }
+
+                val offset = chunkIndex.toLong() * chunkSize
+                val thisChunkSize = minOf(chunkSize, fileSize - offset).toInt()
+
+                val chunkFile = File(tempDir, "chunk_$chunkIndex")
+                splitChunk(localFile, chunkFile, offset, thisChunkSize)
+                val chunkChecksum = computeSha256(chunkFile)
+
+                val message = retryWithBackoff(MAX_RETRIES) {
+                    api.sendDocument(
+                        token = token, chatId = chatId, file = chunkFile,
+                        fileName = "${fileName}.part${chunkIndex + 1}of$totalChunks",
+                        onProgress = { bytesWritten, _ ->
+                            progressFlow.value = progressFlow.value.copy(
+                                bytesTransferred = bytesUploaded + bytesWritten,
+                            )
+                        },
+                    ).getOrThrow()
+                }
+
+                chunkDao.insertChunk(
+                    ChunkEntity(
+                        fileId = fileId,
+                        chunkIndex = chunkIndex,
+                        telegramMessageId = message.messageId,
+                        telegramFileId = message.document?.fileId,
+                        checksum = chunkChecksum,
+                        size = thisChunkSize.toLong(),
+                    )
+                )
+
+                chunkFile.delete()
+                bytesUploaded += thisChunkSize
+                progressFlow.value = progressFlow.value.copy(
+                    currentChunk = chunkIndex + 1,
+                    bytesTransferred = bytesUploaded,
+                )
+            }
+        } finally {
+            // Always clean up this file's temp dir
+            tempDir.deleteRecursively()
+        }
+
+        markUploaded(fileId)
+        progressFlow.value = progressFlow.value.copy(status = TransferStatus.COMPLETED)
+    }
+
+    private suspend fun markUploaded(fileId: Long) {
+        val existing = syncStateDao.getSyncState(fileId)
+        syncStateDao.insertOrUpdate(
+            (existing ?: SyncStateEntity(fileId = fileId)).copy(
+                status = SyncStatus.UPLOADED,
+                lastAttempt = System.currentTimeMillis(),
+            )
+        )
     }
 
     /**
@@ -208,28 +273,27 @@ class ChunkManager(
                         throw CancellationException("Download cancelled")
                     }
 
-                    val messageId = chunk.telegramMessageId
-                        ?: throw IllegalStateException("Chunk ${chunk.chunkIndex} has no message_id")
+                    val tgFileId = chunk.telegramFileId
+                        ?: throw IllegalStateException("Chunk ${chunk.chunkIndex} has no Telegram file_id")
 
-                    // We need the file_id from the Telegram message to download
-                    // For now use getFile -> downloadFile approach
-                    // The chunk's telegram_message_id is stored, but we need file_id
-                    // In practice, we'd store file_id per chunk too; for now,
-                    // use the document's file_id stored in the message
+                    // Get file path from Telegram
+                    val tgFile = retryWithBackoff(MAX_RETRIES) {
+                        api.getFile(token, tgFileId).getOrThrow()
+                    }
+                    val filePath = tgFile.filePath
+                        ?: throw IllegalStateException("No file_path for chunk ${chunk.chunkIndex}")
 
-                    // Re-fetch chunk data via Telegram file_id stored in chunk metadata.
-                    // Phase 4: download pattern (file_id per chunk to be stored in upload).
-                    val chunkBytes: ByteArray = retryWithBackoff(MAX_RETRIES) {
-                        // For now, return empty — requires file_id per chunk enhancement.
-                        ByteArray(0)
+                    // Download chunk bytes
+                    val chunkBytes = retryWithBackoff(MAX_RETRIES) {
+                        api.downloadFile(token, filePath).getOrThrow()
                     }
 
                     // Verify checksum
-                    val downloadedChecksum = computeSha256(chunkBytes)
-                    if (chunk.checksum.isNotBlank() && downloadedChecksum != chunk.checksum) {
-                        throw SecurityException(
-                            "Checksum mismatch for chunk ${chunk.chunkIndex}"
-                        )
+                    if (chunk.checksum.isNotBlank()) {
+                        val downloadedChecksum = computeSha256(chunkBytes)
+                        if (downloadedChecksum != chunk.checksum) {
+                            throw SecurityException("Checksum mismatch for chunk ${chunk.chunkIndex}")
+                        }
                     }
 
                     output.write(chunkBytes)
@@ -242,9 +306,7 @@ class ChunkManager(
                 }
             }
 
-            progressFlow.value = progressFlow.value.copy(
-                status = TransferStatus.COMPLETED,
-            )
+            progressFlow.value = progressFlow.value.copy(status = TransferStatus.COMPLETED)
         }.onFailure { e ->
             progressFlow.value = progressFlow.value.copy(
                 status = if (e is CancellationException) TransferStatus.CANCELLED
@@ -291,10 +353,7 @@ class ChunkManager(
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    private suspend fun <T> retryWithBackoff(
-        maxRetries: Int,
-        block: suspend () -> T,
-    ): T {
+    private suspend fun <T> retryWithBackoff(maxRetries: Int, block: suspend () -> T): T {
         var lastException: Throwable? = null
         for (attempt in 0 until maxRetries) {
             try {

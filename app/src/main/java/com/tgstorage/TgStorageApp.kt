@@ -17,7 +17,9 @@ class TgStorageApp : Application() {
             applicationContext,
             TgStorageDatabase::class.java,
             TgStorageDatabase.DATABASE_NAME,
-        ).build()
+        )
+            .addMigrations(TgStorageDatabase.MIGRATION_1_2)
+            .build()
     }
 
     companion object {
