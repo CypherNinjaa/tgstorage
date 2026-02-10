@@ -80,6 +80,11 @@ fun TgStorageNavGraph(
         composable(Screen.Upload.route) {
             UploadScreen(
                 onNavigateBack = { navController.popBackStack() },
+                onNavigateToFileDetail = { fileId ->
+                    navController.navigate(Screen.FileDetail.createRoute(fileId)) {
+                        popUpTo(Screen.Upload.route) { inclusive = true }
+                    }
+                },
             )
         }
 
