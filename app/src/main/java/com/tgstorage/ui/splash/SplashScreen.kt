@@ -27,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.tgstorage.TgStorageApp
 import kotlinx.coroutines.delay
 
 @Composable
@@ -39,9 +40,15 @@ fun SplashScreen(
     LaunchedEffect(Unit) {
         visible = true
         delay(2000L)
-        // TODO: Phase 2 — check if onboarding is completed from MetadataDao
-        // For now, always navigate to Home (app shell)
-        onNavigateToHome()
+
+        val metadataDao = TgStorageApp.instance.database.metadataDao()
+        val onboardingDone = metadataDao.getValue("onboarding_completed")
+
+        if (onboardingDone == "true") {
+            onNavigateToHome()
+        } else {
+            onNavigateToOnboarding()
+        }
     }
 
     Box(
