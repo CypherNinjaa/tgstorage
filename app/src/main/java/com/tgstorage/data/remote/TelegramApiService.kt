@@ -14,7 +14,11 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.Response
+import okio.Buffer
 import okio.BufferedSink
+import okio.ForwardingSink
+import okio.Sink
+import okio.buffer
 import okio.source
 import java.io.File
 import java.io.IOException
@@ -222,21 +226,21 @@ class CountingRequestBody(
     override fun writeTo(sink: BufferedSink) {
         val total = contentLength()
         val countingSink = CountingSink(sink, total, onProgress)
-        val bufferedSink = okio.buffer(countingSink)
+        val bufferedSink = countingSink.buffer()
         delegate.writeTo(bufferedSink)
         bufferedSink.flush()
     }
 }
 
 private class CountingSink(
-    delegate: okio.Sink,
+    delegate: Sink,
     private val total: Long,
     private val onProgress: (bytesWritten: Long, totalBytes: Long) -> Unit,
-) : okio.ForwardingSink(delegate) {
+) : ForwardingSink(delegate) {
 
     private var bytesWritten = 0L
 
-    override fun write(source: okio.Buffer, byteCount: Long) {
+    override fun write(source: Buffer, byteCount: Long) {
         super.write(source, byteCount)
         bytesWritten += byteCount
         onProgress(bytesWritten, total)

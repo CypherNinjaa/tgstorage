@@ -9,6 +9,18 @@ import androidx.room.Update
 import com.tgstorage.data.local.entity.FileEntity
 import kotlinx.coroutines.flow.Flow
 
+/** Projection for the Uploaded tab — rich file info with upload date + Telegram IDs */
+data class UploadedFileInfo(
+    val id: Long,
+    val name: String,
+    val size: Long,
+    val mimeType: String,
+    val localUri: String?,
+    val updatedAt: Long,
+    val uploadedAt: Long?,
+    val telegramFileId: String?,
+)
+
 @Dao
 interface FileDao {
 
@@ -41,4 +53,16 @@ interface FileDao {
 
     @Query("SELECT f.* FROM files f INNER JOIN sync_state s ON f.id = s.file_id WHERE s.status = 'uploaded' ORDER BY f.updated_at DESC")
     fun getUploadedFiles(): Flow<List<FileEntity>>
+
+    @Query("""
+        SELECT f.id, f.name, f.size, f.mime_type AS mimeType, f.local_uri AS localUri,
+               f.updated_at AS updatedAt, s.last_attempt AS uploadedAt,
+               c.telegram_file_id AS telegramFileId
+        FROM files f
+        INNER JOIN sync_state s ON f.id = s.file_id
+        LEFT JOIN chunks c ON f.id = c.file_id AND c.chunk_index = 0
+        WHERE s.status = 'uploaded'
+        ORDER BY s.last_attempt DESC
+    """)
+    fun getUploadedFilesDetailed(): Flow<List<UploadedFileInfo>>
 }

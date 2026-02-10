@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.outlined.CloudDone
@@ -35,6 +36,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -51,16 +53,24 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import com.tgstorage.data.local.dao.UploadedFileInfo
 import com.tgstorage.data.local.entity.FileEntity
 import com.tgstorage.data.transfer.TransferProgress
 import com.tgstorage.data.transfer.TransferStatus
 import com.tgstorage.data.transfer.TransferType
 import com.tgstorage.ui.components.EmptyState
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -115,6 +125,7 @@ fun TransferQueueScreen(
                 )
                 1 -> UploadedTab(
                     files = state.uploadedFiles,
+                    downloadingIds = state.downloadingIds,
                     onDownload = viewModel::enqueueDownload,
                 )
             }
@@ -255,8 +266,9 @@ private fun GlobalProgressCard(activeTransfers: List<TransferProgress>) {
 
 @Composable
 private fun UploadedTab(
-    files: List<FileEntity>,
-    onDownload: (FileEntity) -> Unit,
+    files: List<UploadedFileInfo>,
+    downloadingIds: Set<Long>,
+    onDownload: (UploadedFileInfo) -> Unit,
 ) {
     if (files.isEmpty()) {
         EmptyState(
@@ -266,6 +278,13 @@ private fun UploadedTab(
             modifier = Modifier.fillMaxSize(),
         )
     } else {
+        // Group by date
+        val dateFormat = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault())
+        val grouped = files.groupBy { file ->
+            val ts = file.uploadedAt ?: file.updatedAt
+            dateFormat.format(Date(ts))
+        }
+
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -276,8 +295,19 @@ private fun UploadedTab(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
             }
-            items(files, key = { it.id }) { file ->
-                UploadedFileCard(file = file, onDownload = { onDownload(file) })
+            grouped.forEach { (date, group) ->
+                item {
+                    Text(date, style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
+                }
+                items(group, key = { it.id }) { file ->
+                    UploadedFileCard(
+                        file = file,
+                        isDownloading = file.id in downloadingIds,
+                        onDownload = { onDownload(file) },
+                    )
+                }
             }
             item { Spacer(Modifier.height(80.dp)) }
         }
@@ -286,32 +316,84 @@ private fun UploadedTab(
 
 @Composable
 private fun UploadedFileCard(
-    file: FileEntity,
+    file: UploadedFileInfo,
+    isDownloading: Boolean,
     onDownload: () -> Unit,
 ) {
+    val isImage = file.mimeType.startsWith("image/")
+    val isVideo = file.mimeType.startsWith("video/")
+    val hasLocalThumb = file.localUri != null && (isImage || isVideo)
+    val timeFormat = SimpleDateFormat("hh:mm a", Locale.getDefault())
+    val uploadTime = timeFormat.format(Date(file.uploadedAt ?: file.updatedAt))
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
     ) {
         Row(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(
-                fileMimeIcon(file.mimeType), null, Modifier.size(40.dp),
-                tint = MaterialTheme.colorScheme.primary,
-            )
+            // Thumbnail / icon
+            Box(
+                modifier = Modifier.size(56.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surface),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (hasLocalThumb) {
+                    AsyncImage(
+                        model = ImageRequest.Builder(androidx.compose.ui.platform.LocalContext.current)
+                            .data(File(file.localUri!!))
+                            .size(128)
+                            .crossfade(true)
+                            .build(),
+                        contentDescription = file.name,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    )
+                } else {
+                    Icon(
+                        fileMimeIcon(file.mimeType), null, Modifier.size(32.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(file.name, style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium, maxLines = 1,
                     overflow = TextOverflow.Ellipsis)
-                Text(formatSize(file.size), style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(2.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // File size
+                    Text(formatSize(file.size), style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(" • ", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    // Upload time
+                    Text(uploadTime, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.height(2.dp))
+                // Mime type badge
+                Text(
+                    file.mimeType.substringAfter("/").uppercase().take(8),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
             }
-            IconButton(onClick = onDownload) {
-                Icon(Icons.Filled.Download, "Download",
-                    tint = MaterialTheme.colorScheme.primary)
+            // Download button or loading indicator
+            if (isDownloading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    strokeWidth = 2.dp,
+                )
+            } else {
+                IconButton(onClick = onDownload) {
+                    Icon(Icons.Filled.Download, "Download",
+                        tint = MaterialTheme.colorScheme.primary)
+                }
             }
         }
     }

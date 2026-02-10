@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import com.tgstorage.data.local.dao.FileDao
 import com.tgstorage.data.local.dao.SyncStateDao
+import com.tgstorage.data.local.dao.UploadedFileInfo
 import com.tgstorage.data.local.entity.FileEntity
 import com.tgstorage.data.local.entity.SyncStateEntity
 import com.tgstorage.data.local.entity.SyncStatus
@@ -39,6 +40,9 @@ class FileRepository(
 
     fun getUploadedFiles(): Flow<List<FileEntity>> =
         fileDao.getUploadedFiles()
+
+    fun getUploadedFilesDetailed(): Flow<List<UploadedFileInfo>> =
+        fileDao.getUploadedFilesDetailed()
 
     suspend fun getFileById(id: Long): FileEntity? =
         fileDao.getFileById(id)
