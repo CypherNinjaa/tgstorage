@@ -145,8 +145,11 @@ fun OnboardingScreen(
                         isLoading = state.isLoading,
                         error = state.error,
                         isVerified = state.isChannelVerified,
+                        detectedChannels = state.detectedChannels,
+                        isDetectingChannels = state.isDetectingChannels,
                         onChannelIdChange = viewModel::updateChannelId,
                         onVerify = viewModel::verifyChannel,
+                        onSelectChannel = viewModel::selectDetectedChannel,
                         onBack = viewModel::previousStep,
                     )
                     3 -> BackupRestoreStep(
@@ -396,8 +399,11 @@ private fun VerifyChannelStep(
     isLoading: Boolean,
     error: String?,
     isVerified: Boolean,
+    detectedChannels: List<com.tgstorage.data.remote.DetectedChannel>,
+    isDetectingChannels: Boolean,
     onChannelIdChange: (String) -> Unit,
     onVerify: () -> Unit,
+    onSelectChannel: (com.tgstorage.data.remote.DetectedChannel) -> Unit,
     onBack: () -> Unit,
 ) {
     Column(
@@ -427,18 +433,97 @@ private fun VerifyChannelStep(
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
-            text = "Enter the channel ID or username where your bot is admin",
+            text = if (detectedChannels.isNotEmpty()) "We found your channel! Tap to select it."
+            else "Enter the channel ID or username where your bot is admin",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
+        // ── Detected channels ──
+        if (isDetectingChannels) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "Looking for your channels...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+
+        if (detectedChannels.isNotEmpty()) {
+            detectedChannels.forEach { channel ->
+                val isSelected = channelId == channel.id.toString()
+                Card(
+                    onClick = { onSelectChannel(channel) },
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surfaceContainerLow,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = if (channel.type == "channel") Icons.Outlined.Forum
+                            else Icons.Outlined.Forum,
+                            contentDescription = null,
+                            tint = if (isSelected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = channel.title,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = if (channel.username != null) "@${channel.username}"
+                                else "ID: ${channel.id}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (isSelected) {
+                            Icon(
+                                imageVector = Icons.Filled.CheckCircle,
+                                contentDescription = "Selected",
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+        }
+
+        // ── Manual input ──
         OutlinedTextField(
             value = channelId,
             onValueChange = onChannelIdChange,
-            label = { Text("Channel ID or @username") },
+            label = { Text(if (detectedChannels.isNotEmpty()) "Or enter manually" else "Channel ID or @username") },
             placeholder = { Text("@my_storage_channel or -100123456789") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
@@ -469,7 +554,7 @@ private fun VerifyChannelStep(
                     text = "1. Create a private channel in Telegram\n" +
                             "2. Go to channel settings → Administrators\n" +
                             "3. Add your bot as admin with message permissions\n" +
-                            "4. Copy the channel ID or @username",
+                            "4. Tap your channel above or enter the ID manually",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

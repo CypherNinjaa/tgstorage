@@ -21,6 +21,7 @@ object MetadataKeys {
     const val ENCRYPTION_ENABLED = "encryption_enabled"
     const val PASSPHRASE_SALT = "passphrase_salt"
     const val PASSPHRASE_HASH = "passphrase_hash"
+    const val PASSPHRASE_ENCRYPTED = "passphrase_encrypted" // plaintext encrypted via CryptoManager
     const val KEY_CREATED_AT = "key_created_at"
     const val THEME_MODE = "theme_mode"
     const val DYNAMIC_COLOR = "dynamic_color"
@@ -32,6 +33,7 @@ object MetadataKeys {
     const val SYNC_WIFI_ONLY = "sync_wifi_only"
     const val BACKUP_FILE_ID = "backup_file_id"
     const val AUTO_BACKUP_FREQUENCY = "auto_backup_frequency" // off, daily, weekly, monthly
+    const val FORGOT_PASSWORD_MSG_ID = "forgot_password_msg_id" // message_id sent for forgot password
 }
 
 /** Backup frequency options. */

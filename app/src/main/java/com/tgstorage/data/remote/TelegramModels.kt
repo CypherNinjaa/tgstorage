@@ -38,6 +38,7 @@ data class TelegramMessage(
     val chat: TelegramChat,
     val document: TelegramDocument? = null,
     val text: String? = null,
+    val caption: String? = null,
 )
 
 @Serializable
@@ -68,4 +69,34 @@ data class TelegramChatFullInfo(
     val title: String? = null,
     val username: String? = null,
     @SerialName("pinned_message") val pinnedMessage: TelegramMessage? = null,
+)
+
+// ─── getUpdates models (for channel auto-detection) ────
+
+@Serializable
+data class TelegramUpdate(
+    @SerialName("update_id") val updateId: Long,
+    @SerialName("my_chat_member") val myChatMember: ChatMemberUpdated? = null,
+)
+
+@Serializable
+data class ChatMemberUpdated(
+    val chat: TelegramChat,
+    @SerialName("new_chat_member") val newChatMember: ChatMemberInfo,
+)
+
+@Serializable
+data class ChatMemberInfo(
+    val status: String, // "administrator", "member", "left", etc.
+    val user: TelegramUser,
+)
+
+/**
+ * Lightweight model for a detected channel the bot has access to.
+ */
+data class DetectedChannel(
+    val id: Long,
+    val title: String,
+    val username: String? = null,
+    val type: String,
 )

@@ -22,6 +22,13 @@ data class UploadedFileInfo(
     val telegramFileId: String?,
 )
 
+/** Projection for storage stats — file type breakdown */
+data class FileTypeStats(
+    val category: String,
+    val fileCount: Int,
+    val totalSize: Long,
+)
+
 @Dao
 interface FileDao {
 
@@ -115,4 +122,49 @@ interface FileDao {
     /** Set thumbnail URI */
     @Query("UPDATE files SET thumbnail_uri = :uri WHERE id = :fileId")
     suspend fun setThumbnailUri(fileId: Long, uri: String)
+
+    // ── Storage Stats Queries ────────────────────────
+
+    /** Total size of all files */
+    @Query("SELECT COALESCE(SUM(size), 0) FROM files")
+    fun getTotalSize(): Flow<Long>
+
+    /** Size breakdown by mime type prefix (image, video, audio, application, etc.) */
+    @Query("""
+        SELECT 
+            CASE 
+                WHEN mime_type LIKE 'image/%' THEN 'Images'
+                WHEN mime_type LIKE 'video/%' THEN 'Videos'
+                WHEN mime_type LIKE 'audio/%' THEN 'Audio'
+                WHEN mime_type LIKE 'text/%' THEN 'Documents'
+                WHEN mime_type LIKE 'application/pdf' THEN 'Documents'
+                WHEN mime_type LIKE 'application/msword%' THEN 'Documents'
+                WHEN mime_type LIKE 'application/vnd.openxmlformats%' THEN 'Documents'
+                WHEN mime_type LIKE 'application/zip%' THEN 'Archives'
+                WHEN mime_type LIKE 'application/x-rar%' THEN 'Archives'
+                WHEN mime_type LIKE 'application/x-7z%' THEN 'Archives'
+                WHEN mime_type LIKE 'application/gzip%' THEN 'Archives'
+                WHEN mime_type LIKE 'application/x-tar%' THEN 'Archives'
+                ELSE 'Other'
+            END AS category,
+            COUNT(*) AS fileCount,
+            COALESCE(SUM(size), 0) AS totalSize
+        FROM files
+        GROUP BY category
+        ORDER BY totalSize DESC
+    """)
+    suspend fun getFileTypeBreakdown(): List<FileTypeStats>
+
+    /** Largest files (top 10) */
+    @Query("SELECT * FROM files ORDER BY size DESC LIMIT 10")
+    suspend fun getLargestFiles(): List<FileEntity>
+
+    /** Total uploaded size (files with 'uploaded' sync status) */
+    @Query("""
+        SELECT COALESCE(SUM(f.size), 0)
+        FROM files f
+        INNER JOIN sync_state s ON f.id = s.file_id
+        WHERE s.status = 'uploaded'
+    """)
+    fun getUploadedTotalSize(): Flow<Long>
 }

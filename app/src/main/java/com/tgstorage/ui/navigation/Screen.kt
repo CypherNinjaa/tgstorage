@@ -12,6 +12,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 sealed class Screen(val route: String) {
     data object Splash : Screen("splash")
     data object Onboarding : Screen("onboarding")
+    data object Lock : Screen("lock")
     data object Home : Screen("home")
     data object FileDetail : Screen("file_detail/{fileId}") {
         fun createRoute(fileId: Long): String = "file_detail/$fileId"

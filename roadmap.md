@@ -351,7 +351,7 @@ Primary use cases:
 
 - **Storage Stats Screen**
   - Donut chart or bar: used space on Telegram by file type
-  - Local cache size
+  - tg  size
   - Total files count, total chunks count
   - "Largest files" quick list
 - **About / Help Screen**

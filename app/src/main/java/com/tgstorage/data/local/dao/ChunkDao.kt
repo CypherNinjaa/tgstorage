@@ -21,4 +21,12 @@ interface ChunkDao {
 
     @Query("DELETE FROM chunks WHERE file_id = :fileId")
     suspend fun deleteChunksForFile(fileId: Long)
+
+    /** Total chunk count across all files */
+    @Query("SELECT COUNT(*) FROM chunks")
+    fun getTotalChunkCount(): Flow<Int>
+
+    /** Total size of all chunks (approx Telegram storage used) */
+    @Query("SELECT COALESCE(SUM(size), 0) FROM chunks")
+    fun getTotalChunkSize(): Flow<Long>
 }

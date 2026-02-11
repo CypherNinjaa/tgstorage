@@ -34,6 +34,7 @@ import kotlinx.coroutines.delay
 fun SplashScreen(
     onNavigateToHome: () -> Unit,
     onNavigateToOnboarding: () -> Unit,
+    onNavigateToLock: () -> Unit = {},
 ) {
     var visible by remember { mutableStateOf(false) }
 
@@ -45,7 +46,13 @@ fun SplashScreen(
         val onboardingDone = metadataDao.getValue("onboarding_completed")
 
         if (onboardingDone == "true") {
-            onNavigateToHome()
+            // Check if passphrase lock is set
+            val passphraseHash = metadataDao.getValue("passphrase_hash")
+            if (!passphraseHash.isNullOrBlank()) {
+                onNavigateToLock()
+            } else {
+                onNavigateToHome()
+            }
         } else {
             onNavigateToOnboarding()
         }

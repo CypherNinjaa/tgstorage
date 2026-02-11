@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.tgstorage.TgStorageApp
+import com.tgstorage.data.remote.DetectedChannel
 import com.tgstorage.data.remote.TelegramApiService
 import com.tgstorage.data.remote.TelegramUser
 import com.tgstorage.data.repository.TelegramRepository
@@ -28,6 +29,9 @@ data class OnboardingUiState(
     val isTokenValid: Boolean = false,
     val isChannelVerified: Boolean = false,
     val isComplete: Boolean = false,
+    // Channel auto-detection
+    val detectedChannels: List<DetectedChannel> = emptyList(),
+    val isDetectingChannels: Boolean = false,
     // Backup restore
     val backupInfo: BackupInfo? = null,
     val isSearchingBackup: Boolean = false,
@@ -82,8 +86,11 @@ class OnboardingViewModel(
                             isTokenValid = true,
                             error = null,
                             currentStep = 2,
+                            isDetectingChannels = true,
                         )
                     }
+                    // Auto-detect channels in background
+                    detectChannels()
                 }
                 .onFailure { e ->
                     _uiState.update {
@@ -137,6 +144,28 @@ class OnboardingViewModel(
                         )
                     }
                 }
+        }
+    }
+
+    /**
+     * Select a channel from the auto-detected list and populate the channel ID field.
+     */
+    fun selectDetectedChannel(channel: DetectedChannel) {
+        _uiState.update {
+            it.copy(channelId = channel.id.toString(), error = null)
+        }
+    }
+
+    private fun detectChannels() {
+        val token = _uiState.value.botToken.trim()
+        viewModelScope.launch {
+            val channels = repository.detectChannels(token)
+            _uiState.update {
+                it.copy(
+                    detectedChannels = channels,
+                    isDetectingChannels = false,
+                )
+            }
         }
     }
 

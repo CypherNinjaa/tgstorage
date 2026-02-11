@@ -97,10 +97,7 @@ class BackupManager(
             val chatId = telegramRepo.getChatId()
                 ?: throw IllegalStateException("Channel not configured")
 
-            // 1. Force WAL checkpoint via Room's query interface
-            db.query("PRAGMA wal_checkpoint(FULL)", null)
-
-            // 2. Copy the database file
+            // 1. Copy the database files (Room keeps running)
             val dbFile = context.getDatabasePath(TgStorageDatabase.DATABASE_NAME)
             val tempDbCopy = File(context.cacheDir, "backup_temp.db")
             val walFile = File(dbFile.path + "-wal")
@@ -113,13 +110,25 @@ class BackupManager(
                         input.copyTo(output)
                     }
                 }
-                // Copy WAL if it exists (ensures consistency)
+                // Copy WAL and SHM if they exist
                 val tempWal = File(context.cacheDir, "backup_temp.db-wal")
                 val tempShm = File(context.cacheDir, "backup_temp.db-shm")
                 if (walFile.exists()) walFile.copyTo(tempWal, overwrite = true)
                 if (shmFile.exists()) shmFile.copyTo(tempShm, overwrite = true)
 
-                // 3. Encrypt the DB copy with token-derived key
+                // 2. Open the COPY with raw SQLite to force WAL checkpoint
+                //    This merges all WAL data into the main db file
+                val rawDb = SQLiteDatabase.openDatabase(
+                    tempDbCopy.path, null, SQLiteDatabase.OPEN_READWRITE
+                )
+                // Use rawQuery for PRAGMA (execSQL doesn't support PRAGMA)
+                rawDb.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).use { it.moveToFirst() }
+                rawDb.close()
+                // WAL is now fully merged — delete the temp WAL/SHM
+                tempWal.delete()
+                tempShm.delete()
+
+                // 3. Encrypt the complete DB copy with token-derived key
                 val plainBytes = tempDbCopy.readBytes()
                 val encryptedBytes = encryptForBackup(plainBytes, token)
 
@@ -172,8 +181,6 @@ class BackupManager(
 
                 // 7. Clean up temp files
                 secureDelete(tempDbCopy)
-                secureDelete(tempWal)
-                secureDelete(tempShm)
                 secureDelete(encryptedFile)
 
                 messageId
@@ -203,7 +210,7 @@ class BackupManager(
 
             // Verify it's a TgStorage backup by filename or caption
             val isBackup = document.fileName == BACKUP_FILE_NAME ||
-                    pinnedMessage.text?.contains("TgStorage Backup") == true
+                    pinnedMessage.caption?.contains("TgStorage Backup") == true
 
             if (!isBackup) return@withContext null
 

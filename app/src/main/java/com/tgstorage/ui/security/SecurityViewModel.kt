@@ -96,6 +96,8 @@ class SecurityViewModel : ViewModel() {
             val hash = hashPassphrase(state.newPassphrase.toCharArray(), salt)
             metadataDao.setValue(MetadataEntity(MetadataKeys.PASSPHRASE_SALT, Base64.encodeToString(salt, Base64.NO_WRAP)))
             metadataDao.setValue(MetadataEntity(MetadataKeys.PASSPHRASE_HASH, Base64.encodeToString(hash, Base64.NO_WRAP)))
+            // Store encrypted plaintext for "forgot password" recovery via Telegram
+            metadataDao.setValue(MetadataEntity(MetadataKeys.PASSPHRASE_ENCRYPTED, CryptoManager.encryptString(state.newPassphrase)))
 
             _uiState.update {
                 it.copy(

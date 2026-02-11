@@ -4,6 +4,7 @@ import com.tgstorage.common.security.CryptoManager
 import com.tgstorage.data.local.dao.MetadataDao
 import com.tgstorage.data.local.entity.MetadataEntity
 import com.tgstorage.data.local.entity.MetadataKeys
+import com.tgstorage.data.remote.DetectedChannel
 import com.tgstorage.data.remote.TelegramApiService
 import com.tgstorage.data.remote.TelegramMessage
 import com.tgstorage.data.remote.TelegramUser
@@ -87,4 +88,27 @@ class TelegramRepository(
         file: File,
         fileName: String = file.name,
     ): Result<TelegramMessage> = api.sendDocument(token, chatId, file, fileName)
+
+    /**
+     * Auto-detect channels/groups the bot has been added to via getUpdates.
+     * Looks for my_chat_member updates where the bot became an administrator.
+     */
+    suspend fun detectChannels(token: String): List<DetectedChannel> {
+        val updates = api.getUpdates(token).getOrNull() ?: return emptyList()
+        return updates
+            .mapNotNull { it.myChatMember }
+            .filter { member ->
+                member.newChatMember.status in listOf("administrator", "member", "creator") &&
+                        member.chat.type in listOf("channel", "supergroup", "group")
+            }
+            .map { member ->
+                DetectedChannel(
+                    id = member.chat.id,
+                    title = member.chat.title ?: "Unknown",
+                    username = member.chat.username,
+                    type = member.chat.type,
+                )
+            }
+            .distinctBy { it.id }
+    }
 }

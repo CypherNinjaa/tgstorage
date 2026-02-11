@@ -1,5 +1,9 @@
 package com.tgstorage.ui.navigation
 
+import androidx.compose.animation.AnimatedContentTransitionScope
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.runtime.Composable
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -11,6 +15,7 @@ import com.tgstorage.ui.backup.BackupRestoreScreen
 import com.tgstorage.ui.download.DownloadScreen
 import com.tgstorage.ui.filedetail.FileDetailScreen
 import com.tgstorage.ui.home.HomeScreen
+import com.tgstorage.ui.lock.LockScreen
 import com.tgstorage.ui.onboarding.OnboardingScreen
 import com.tgstorage.ui.security.SecurityScreen
 import com.tgstorage.ui.settings.SettingsScreen
@@ -20,6 +25,8 @@ import com.tgstorage.ui.sync.SyncDashboardScreen
 import com.tgstorage.ui.transfers.TransferQueueScreen
 import com.tgstorage.ui.upload.UploadScreen
 
+private const val NAV_ANIM_DURATION = 300
+
 @Composable
 fun TgStorageNavGraph(
     navController: NavHostController,
@@ -28,8 +35,30 @@ fun TgStorageNavGraph(
     NavHost(
         navController = navController,
         startDestination = startDestination,
+        enterTransition = {
+            slideIntoContainer(
+                AnimatedContentTransitionScope.SlideDirection.Start,
+                animationSpec = tween(NAV_ANIM_DURATION),
+            )
+        },
+        exitTransition = {
+            fadeOut(animationSpec = tween(NAV_ANIM_DURATION))
+        },
+        popEnterTransition = {
+            slideIntoContainer(
+                AnimatedContentTransitionScope.SlideDirection.End,
+                animationSpec = tween(NAV_ANIM_DURATION),
+            )
+        },
+        popExitTransition = {
+            fadeOut(animationSpec = tween(NAV_ANIM_DURATION))
+        },
     ) {
-        composable(Screen.Splash.route) {
+        composable(
+            Screen.Splash.route,
+            enterTransition = { fadeIn(tween(NAV_ANIM_DURATION)) },
+            exitTransition = { fadeOut(tween(NAV_ANIM_DURATION)) },
+        ) {
             SplashScreen(
                 onNavigateToHome = {
                     navController.navigate(Screen.Home.route) {
@@ -39,6 +68,21 @@ fun TgStorageNavGraph(
                 onNavigateToOnboarding = {
                     navController.navigate(Screen.Onboarding.route) {
                         popUpTo(Screen.Splash.route) { inclusive = true }
+                    }
+                },
+                onNavigateToLock = {
+                    navController.navigate(Screen.Lock.route) {
+                        popUpTo(Screen.Splash.route) { inclusive = true }
+                    }
+                },
+            )
+        }
+
+        composable(Screen.Lock.route) {
+            LockScreen(
+                onUnlocked = {
+                    navController.navigate(Screen.Home.route) {
+                        popUpTo(Screen.Lock.route) { inclusive = true }
                     }
                 },
             )
@@ -54,7 +98,13 @@ fun TgStorageNavGraph(
             )
         }
 
-        composable(Screen.Home.route) {
+        composable(
+            Screen.Home.route,
+            enterTransition = { fadeIn(tween(NAV_ANIM_DURATION)) },
+            exitTransition = { fadeOut(tween(NAV_ANIM_DURATION)) },
+            popEnterTransition = { fadeIn(tween(NAV_ANIM_DURATION)) },
+            popExitTransition = { fadeOut(tween(NAV_ANIM_DURATION)) },
+        ) {
             HomeScreen(
                 onNavigateToUpload = { navController.navigate(Screen.Upload.route) },
                 onNavigateToFileDetail = { fileId ->
@@ -99,7 +149,13 @@ fun TgStorageNavGraph(
             )
         }
 
-        composable(Screen.TransferQueue.route) {
+        composable(
+            Screen.TransferQueue.route,
+            enterTransition = { fadeIn(tween(NAV_ANIM_DURATION)) },
+            exitTransition = { fadeOut(tween(NAV_ANIM_DURATION)) },
+            popEnterTransition = { fadeIn(tween(NAV_ANIM_DURATION)) },
+            popExitTransition = { fadeOut(tween(NAV_ANIM_DURATION)) },
+        ) {
             TransferQueueScreen(
                 onNavigateToFileDetail = { fileId ->
                     navController.navigate(Screen.FileDetail.createRoute(fileId))
@@ -119,7 +175,13 @@ fun TgStorageNavGraph(
             )
         }
 
-        composable(Screen.Settings.route) {
+        composable(
+            Screen.Settings.route,
+            enterTransition = { fadeIn(tween(NAV_ANIM_DURATION)) },
+            exitTransition = { fadeOut(tween(NAV_ANIM_DURATION)) },
+            popEnterTransition = { fadeIn(tween(NAV_ANIM_DURATION)) },
+            popExitTransition = { fadeOut(tween(NAV_ANIM_DURATION)) },
+        ) {
             SettingsScreen(
                 onNavigateToSecurity = { navController.navigate(Screen.Security.route) },
                 onNavigateToAbout = { navController.navigate(Screen.About.route) },

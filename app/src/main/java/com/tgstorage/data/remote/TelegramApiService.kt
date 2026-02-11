@@ -217,6 +217,26 @@ class TelegramApiService {
         )
     }
 
+    /**
+     * GET /getUpdates — fetches recent updates.
+     * Used to auto-detect channels the bot has been added to.
+     */
+    suspend fun getUpdates(
+        token: String,
+        allowedUpdates: List<String> = listOf("my_chat_member"),
+    ): Result<List<TelegramUpdate>> {
+        val updatesParam = allowedUpdates.joinToString(",") { "\"$it\"" }
+        val url = "${BASE_URL}${token}/getUpdates?allowed_updates=[$updatesParam]"
+        return executeGet(
+            url = url,
+            deserialize = { body ->
+                val resp = json.decodeFromString<TelegramResponse<List<TelegramUpdate>>>(body)
+                if (resp.ok && resp.result != null) resp.result
+                else throw TelegramApiException(resp.description ?: "getUpdates failed", resp.errorCode)
+            },
+        )
+    }
+
     // ─── Helpers ────────────────────────────────────────
 
     private suspend fun <T> executeGet(
