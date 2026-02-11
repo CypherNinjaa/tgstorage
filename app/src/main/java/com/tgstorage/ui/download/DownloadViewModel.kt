@@ -5,6 +5,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.tgstorage.TgStorageApp
+import com.tgstorage.common.NetworkMonitor
+import com.tgstorage.common.StorageUtils
 import com.tgstorage.data.local.entity.FileEntity
 import com.tgstorage.data.repository.FileRepository
 import com.tgstorage.data.transfer.TransferManager
@@ -14,6 +16,7 @@ import com.tgstorage.data.transfer.TransferType
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
@@ -58,9 +61,29 @@ class DownloadViewModel(
 
     fun startDownload() {
         val file = _uiState.value.file ?: return
-        _uiState.update { it.copy(isDownloading = true, error = null) }
 
         viewModelScope.launch {
+            // Phase 9: Check network before download
+            val context = TgStorageApp.instance
+            val isOnline = NetworkMonitor(context).isOnline.first()
+            if (!isOnline) {
+                _uiState.update {
+                    it.copy(error = "No internet connection. Please connect and try again.")
+                }
+                return@launch
+            }
+
+            // Phase 9: Check storage space before download
+            if (!StorageUtils.hasEnoughSpace(context, file.size, useExternal = true)) {
+                val available = StorageUtils.formatBytes(StorageUtils.getAvailableExternalStorage(context))
+                val needed = StorageUtils.formatBytes(file.size)
+                _uiState.update {
+                    it.copy(error = "Not enough storage space. Need $needed but only $available available.")
+                }
+                return@launch
+            }
+
+            _uiState.update { it.copy(isDownloading = true, error = null) }
             try {
                 // Destination: app-private files dir; user can export later
                 val destDir = File(

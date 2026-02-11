@@ -2,6 +2,7 @@ package com.tgstorage.data.transfer
 
 import com.tgstorage.TgStorageApp
 import com.tgstorage.data.local.entity.FileEntity
+import com.tgstorage.data.remote.TokenValidator
 import com.tgstorage.data.repository.TelegramRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -84,6 +85,30 @@ object TransferManager {
                 progressFlow.value = progressFlow.value.copy(
                     status = TransferStatus.FAILED,
                     error = "Bot token or channel not configured",
+                )
+                return@launch
+            }
+
+            // Phase 9: Validate token before upload
+            val db = TgStorageApp.instance.database
+            val tokenValid = TokenValidator.validateToken(
+                api = com.tgstorage.data.remote.TelegramApiService(),
+                token = token,
+                metadataDao = db.metadataDao(),
+            )
+            if (!tokenValid) {
+                val errorMsg = when (TokenValidator.tokenStatus.value) {
+                    is TokenValidator.TokenStatus.Revoked ->
+                        "Bot token has been revoked. Please update it in Settings."
+                    is TokenValidator.TokenStatus.RateLimited ->
+                        "Telegram rate limit reached. Please try again later."
+                    is TokenValidator.TokenStatus.NetworkError ->
+                        "No internet connection."
+                    else -> "Token validation failed."
+                }
+                progressFlow.value = progressFlow.value.copy(
+                    status = TransferStatus.FAILED,
+                    error = errorMsg,
                 )
                 return@launch
             }

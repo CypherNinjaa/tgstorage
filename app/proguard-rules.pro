@@ -1,6 +1,7 @@
-# ProGuard rules for TgStorage
+# ProGuard / R8 rules for TgStorage
+# Optimized for minimal APK size
 
-# Keep Kotlin Serialization
+# ─── Kotlin Serialization ───────────────────────────
 -keepattributes *Annotation*, InnerClasses
 -dontnote kotlinx.serialization.AnnotationsKt
 
@@ -19,12 +20,19 @@
     kotlinx.serialization.KSerializer serializer(...);
 }
 
-# Room
--keep class * extends androidx.room.RoomDatabase
--keep @androidx.room.Entity class *
+# ─── Room ───────────────────────────────────────────
+-keep class * extends androidx.room.RoomDatabase { void <init>(); }
+-keep @androidx.room.Entity class * { void <init>(); }
+-keep @androidx.room.Dao interface *
 -dontwarn androidx.room.paging.**
 
-# OkHttp
+# ─── OkHttp (minimal keeps — let R8 strip unused) ──
 -dontwarn okhttp3.**
 -dontwarn okio.**
--keep class okhttp3.** { *; }
+# Only keep the public suffix database needed at runtime
+-keep class okhttp3.internal.publicsuffix.PublicSuffixDatabase { *; }
+
+# ─── General size optimizations ────────────────────
+-repackageclasses ''
+-allowaccessmodification
+-optimizationpasses 5

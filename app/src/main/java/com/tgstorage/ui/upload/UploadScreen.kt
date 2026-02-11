@@ -114,7 +114,7 @@ fun UploadScreen(
                 Spacer(modifier = Modifier.height(48.dp))
                 Icon(
                     imageVector = Icons.Filled.UploadFile,
-                    contentDescription = null,
+                    contentDescription = "Upload file",
                     modifier = Modifier.size(80.dp),
                     tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
                 )
@@ -136,7 +136,7 @@ fun UploadScreen(
                     onClick = { filePicker.launch(arrayOf("*/*")) },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Icon(Icons.Filled.CloudUpload, contentDescription = null)
+                    Icon(Icons.Filled.CloudUpload, contentDescription = "Upload")
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Select File")
                 }
@@ -164,7 +164,7 @@ fun UploadScreen(
                     ) {
                         Icon(
                             imageVector = mimeIcon(file.mimeType),
-                            contentDescription = null,
+                            contentDescription = file.mimeType,
                             modifier = Modifier.size(48.dp),
                             tint = MaterialTheme.colorScheme.primary,
                         )
@@ -245,7 +245,7 @@ fun UploadScreen(
                         Spacer(modifier = Modifier.height(16.dp))
                         Icon(
                             imageVector = Icons.Filled.CheckCircle,
-                            contentDescription = null,
+                            contentDescription = "Upload complete",
                             modifier = Modifier.size(48.dp),
                             tint = MaterialTheme.colorScheme.primary,
                         )
@@ -329,7 +329,7 @@ fun UploadScreen(
                                 onClick = viewModel::startUpload,
                                 modifier = Modifier.weight(1f),
                             ) {
-                                Icon(Icons.Filled.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Icon(Icons.Filled.CloudUpload, contentDescription = "Upload", modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text("Upload")
                             }

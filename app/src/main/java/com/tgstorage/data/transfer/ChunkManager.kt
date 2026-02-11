@@ -367,6 +367,19 @@ class ChunkManager(
                 }
             }
 
+            // Phase 9: Verify full file hash after download reassembly
+            val file = fileDao.getFileById(fileId)
+            if (file != null && file.sha256.isNotBlank()) {
+                val downloadedHash = computeSha256(outputFile)
+                if (downloadedHash != file.sha256) {
+                    outputFile.delete()
+                    throw SecurityException(
+                        "File integrity check failed: hash mismatch after download. " +
+                        "Expected ${file.sha256.take(16)}… got ${downloadedHash.take(16)}…"
+                    )
+                }
+            }
+
             progressFlow.value = progressFlow.value.copy(status = TransferStatus.COMPLETED)
         }.onFailure { e ->
             progressFlow.value = progressFlow.value.copy(

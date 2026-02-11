@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SelectAll
@@ -87,6 +88,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -124,6 +128,9 @@ fun HomeScreen(
         arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
     }
 
+    // Phase 9: Toast for "no app found" when opening a file
+    var noAppToast by remember { mutableStateOf(false) }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions(),
     ) { results ->
@@ -140,6 +147,14 @@ fun HomeScreen(
 
     LaunchedEffect(state.message) {
         state.message?.let { snackbarHostState.showSnackbar(it); viewModel.clearMessage() }
+    }
+
+    // Phase 9: Show toast when no app can open a file
+    LaunchedEffect(noAppToast) {
+        if (noAppToast) {
+            snackbarHostState.showSnackbar("No app found to open this file")
+            noAppToast = false
+        }
     }
 
     Scaffold(
@@ -177,8 +192,12 @@ fun HomeScreen(
 
             // ── Banners ─────────────────────────────────
             AnimatedVisibility(visible = !state.isOnline) {
-                StatusBanner(Icons.Outlined.CloudOff, "You're offline",
-                    MaterialTheme.colorScheme.onSurfaceVariant)
+                StatusBanner(
+                    icon = Icons.Outlined.CloudOff,
+                    text = "You're offline",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    accessibilityLabel = "Device is offline",
+                )
             }
             AnimatedVisibility(visible = state.activeUploads > 0) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
@@ -203,7 +222,7 @@ fun HomeScreen(
             // ── Auto-upload toggle ──────────────────────
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Outlined.CloudUpload, null, Modifier.size(18.dp),
+                Icon(Icons.Outlined.CloudUpload, contentDescription = "Auto upload", Modifier.size(18.dp),
                     MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(8.dp))
                 Text("Auto Upload", style = MaterialTheme.typography.labelLarge,
@@ -222,7 +241,7 @@ fun HomeScreen(
                             expanded = searchActive,
                             onExpandedChange = { searchActive = it },
                             placeholder = { Text("Search files…") },
-                            leadingIcon = { Icon(Icons.Filled.Search, null) },
+                            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = "Search") },
                             trailingIcon = {
                                 if (state.searchQuery.isNotEmpty()) {
                                     IconButton(onClick = {
@@ -322,7 +341,7 @@ fun HomeScreen(
         ) {
             DeviceFileInfoSheet(
                 file = infoFile!!,
-                onOpen = { openDeviceFile(context, infoFile!!); infoFile = null },
+                onOpen = { openDeviceFile(context, infoFile!!) { noAppToast = true }; infoFile = null },
                 onClose = { infoFile = null },
             )
         }
@@ -336,7 +355,7 @@ private fun PermissionScreen(onGrant: () -> Unit) {
     Column(Modifier.fillMaxSize().padding(32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center) {
-        Icon(Icons.Outlined.FolderOpen, null, Modifier.size(80.dp),
+        Icon(Icons.Outlined.FolderOpen, contentDescription = "Storage permission needed", Modifier.size(80.dp),
             MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
         Spacer(Modifier.height(16.dp))
         Text("Storage permission needed", style = MaterialTheme.typography.titleLarge,
@@ -355,7 +374,7 @@ private fun EmptyFilesState() {
     Column(Modifier.fillMaxSize().padding(32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center) {
-        Icon(Icons.Outlined.FolderOpen, null, Modifier.size(80.dp),
+        Icon(Icons.Outlined.FolderOpen, contentDescription = "No files found", Modifier.size(80.dp),
             MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
         Spacer(Modifier.height(16.dp))
         Text("No files found", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -367,10 +386,11 @@ private fun EmptyFilesState() {
 }
 
 @Composable
-private fun StatusBanner(icon: ImageVector, text: String, color: Color) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+private fun StatusBanner(icon: ImageVector, text: String, color: Color, accessibilityLabel: String = text) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)
+        .semantics { contentDescription = accessibilityLabel },
         verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, null, Modifier.size(16.dp), color)
+        Icon(icon, contentDescription = null, Modifier.size(16.dp), color)
         Spacer(Modifier.width(8.dp))
         Text(text, style = MaterialTheme.typography.labelMedium, color = color)
     }
@@ -393,7 +413,7 @@ private fun FileThumbnail(file: DeviceFile, modifier: Modifier = Modifier) {
         )
     } else {
         Box(modifier = modifier, contentAlignment = Alignment.Center) {
-            Icon(mimeIcon(file.mimeType), null, Modifier.size(40.dp),
+            Icon(mimeIcon(file.mimeType), contentDescription = file.name, Modifier.size(40.dp),
                 MaterialTheme.colorScheme.primary)
         }
     }
@@ -446,7 +466,13 @@ private fun DeviceFileGridItem(
                 if (isSelected) Modifier.border(2.dp, MaterialTheme.colorScheme.primary, CardDefaults.shape)
                 else Modifier
             )
-            .combinedClickable(onClick = onTap, onLongClick = onLongPress),
+            .combinedClickable(
+                onClick = onTap,
+                onLongClick = onLongPress,
+                onClickLabel = "View file details",
+                onLongClickLabel = "Select file",
+            )
+            .semantics { selected = isSelected },
         colors = CardDefaults.cardColors(
             containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer
             else MaterialTheme.colorScheme.surfaceVariant,
@@ -475,7 +501,7 @@ private fun DeviceFileGridItem(
             if (selectionMode) {
                 Icon(
                     if (isSelected) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked,
-                    null,
+                    contentDescription = if (isSelected) "Selected" else "Not selected",
                     modifier = Modifier.align(Alignment.TopStart).padding(6.dp).size(22.dp)
                         .clip(CircleShape)
                         .then(if (isSelected) Modifier.background(MaterialTheme.colorScheme.primary, CircleShape) else Modifier),
@@ -514,8 +540,11 @@ private fun DeviceFileList(
             val isUploaded = file.name in uploadedNames
             ListItem(
                 modifier = Modifier.combinedClickable(
-                    onClick = { onTap(file) }, onLongClick = { onLongPress(file) },
-                ),
+                    onClick = { onTap(file) },
+                    onLongClick = { onLongPress(file) },
+                    onClickLabel = "View file details",
+                    onLongClickLabel = "Select file",
+                ).semantics { selected = isSelected },
                 headlineContent = {
                     Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 },
@@ -539,7 +568,7 @@ private fun DeviceFileList(
                     if (selectionMode) {
                         Icon(
                             if (isSelected) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked,
-                            null,
+                            contentDescription = if (isSelected) "Selected" else "Not selected",
                             tint = if (isSelected) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                         )
@@ -564,7 +593,7 @@ private fun DeviceFileInfoSheet(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 mimeIcon(file.mimeType),
-                null,
+                contentDescription = file.mimeType,
                 modifier = Modifier.size(28.dp),
                 tint = MaterialTheme.colorScheme.primary,
             )
@@ -622,7 +651,7 @@ private fun InfoRow(label: String, value: String) {
     }
 }
 
-private fun openDeviceFile(context: android.content.Context, file: DeviceFile) {
+private fun openDeviceFile(context: android.content.Context, file: DeviceFile, onNoApp: () -> Unit = {}) {
     try {
         val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
             setDataAndType(file.contentUri, file.mimeType)
@@ -631,14 +660,15 @@ private fun openDeviceFile(context: android.content.Context, file: DeviceFile) {
         val chooser = android.content.Intent.createChooser(intent, "Open with")
         context.startActivity(chooser)
     } catch (_: Exception) {
-        // Ignore if no app can handle the file
+        // Phase 9: Surface error to user instead of silently swallowing
+        onNoApp()
     }
 }
 
 // ─── Helpers ───────────────────────────────────────────
 
 private fun mimeIcon(mimeType: String): ImageVector = when {
-    mimeType.startsWith("image/") -> Icons.Filled.CheckCircle // fallback, shouldn't reach here
+    mimeType.startsWith("image/") -> Icons.Filled.Image
     mimeType.startsWith("video/") -> Icons.Filled.VideoFile
     mimeType.startsWith("audio/") -> Icons.Filled.AudioFile
     mimeType.startsWith("application/pdf") || mimeType.startsWith("text/") -> Icons.Filled.Description

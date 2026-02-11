@@ -19,6 +19,7 @@ import androidx.work.WorkerParameters
 import com.tgstorage.TgStorageApp
 import com.tgstorage.data.local.entity.SyncStatus
 import com.tgstorage.data.remote.TelegramApiService
+import com.tgstorage.data.remote.TokenValidator
 import com.tgstorage.data.repository.SyncRepository
 import com.tgstorage.data.repository.TelegramRepository
 import com.tgstorage.data.transfer.ChunkManager
@@ -144,6 +145,32 @@ class SyncWorker(
         if (token == null || chatId == null) {
             Log.w(TAG, "Bot token or channel not configured, skipping sync")
             return Result.success()
+        }
+
+        // Phase 9: Validate token health before attempting uploads
+        val tokenValid = TokenValidator.validateToken(
+            api = TelegramApiService(),
+            token = token,
+            metadataDao = db.metadataDao(),
+        )
+        if (!tokenValid) {
+            val status = TokenValidator.tokenStatus.value
+            Log.w(TAG, "Token validation failed: $status")
+            return when (status) {
+                is TokenValidator.TokenStatus.Revoked -> {
+                    Log.e(TAG, "Bot token has been revoked — stopping sync")
+                    Result.failure()
+                }
+                is TokenValidator.TokenStatus.RateLimited -> {
+                    Log.w(TAG, "Rate limited — will retry later")
+                    Result.retry()
+                }
+                is TokenValidator.TokenStatus.NetworkError -> {
+                    Log.w(TAG, "Network error — will retry later")
+                    Result.retry()
+                }
+                else -> Result.retry()
+            }
         }
 
         val pendingFiles = syncRepository.getPendingUploads()

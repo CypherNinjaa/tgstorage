@@ -104,7 +104,7 @@ fun DownloadScreen(
                     Spacer(modifier = Modifier.height(80.dp))
                     Icon(
                         imageVector = Icons.Filled.Error,
-                        contentDescription = null,
+                        contentDescription = "Error",
                         modifier = Modifier.size(48.dp),
                         tint = MaterialTheme.colorScheme.error,
                     )
@@ -130,7 +130,7 @@ fun DownloadScreen(
                         ) {
                             Icon(
                                 imageVector = mimeIcon(file.mimeType),
-                                contentDescription = null,
+                                contentDescription = file.mimeType,
                                 modifier = Modifier.size(48.dp),
                                 tint = MaterialTheme.colorScheme.primary,
                             )
@@ -209,7 +209,7 @@ fun DownloadScreen(
                             Spacer(modifier = Modifier.height(16.dp))
                             Icon(
                                 imageVector = Icons.Filled.CheckCircle,
-                                contentDescription = null,
+                                contentDescription = "Download complete",
                                 modifier = Modifier.size(48.dp),
                                 tint = MaterialTheme.colorScheme.primary,
                             )

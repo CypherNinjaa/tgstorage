@@ -2,6 +2,7 @@ package com.tgstorage
 
 import android.app.Application
 import androidx.room.Room
+import com.tgstorage.common.CrashHandler
 import com.tgstorage.data.local.TgStorageDatabase
 import com.tgstorage.data.local.entity.BackupFrequency
 import com.tgstorage.data.local.entity.MetadataKeys
@@ -23,6 +24,9 @@ class TgStorageApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+
+        // Phase 9: Install global crash handler for crash logging & temp cleanup
+        CrashHandler.install(this)
 
         database = Room.databaseBuilder(
             applicationContext,
