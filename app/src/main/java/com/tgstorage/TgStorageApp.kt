@@ -42,6 +42,7 @@ class TgStorageApp : Application() {
                 TgStorageDatabase.MIGRATION_2_3,
                 TgStorageDatabase.MIGRATION_3_4,
                 TgStorageDatabase.MIGRATION_4_5,
+                TgStorageDatabase.MIGRATION_5_6,
             )
             .build()
 

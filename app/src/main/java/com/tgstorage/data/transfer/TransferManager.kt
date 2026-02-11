@@ -64,6 +64,7 @@ object TransferManager {
             syncStateDao = db.syncStateDao(),
             fileDao = db.fileDao(),
             metadataDao = db.metadataDao(),
+            botRepository = getBotRepository(),
         )
     }
 
@@ -389,6 +390,9 @@ object TransferManager {
             // Auto-remove completed uploads after brief delay to free memory
             val finalStatus = progressFlow.value.status
             if (finalStatus == TransferStatus.COMPLETED) {
+                // Trigger auto-backup check after successful upload
+                scope.launch { checkAutoBackupAfterUpload() }
+
                 scope.launch {
                     delay(2000) // Let user see "Done" status briefly
                     removeTransfer(file.id, TransferType.UPLOAD)
@@ -774,4 +778,52 @@ object TransferManager {
         _transfers.value.any {
             it.status == TransferStatus.PENDING || it.status == TransferStatus.IN_PROGRESS
         }
+
+    // ─── Auto-backup after N uploads ──────────────────
+
+    /**
+     * Increments the uploads-since-backup counter and triggers
+     * an automatic DB backup when the threshold is reached.
+     * Default threshold: 10 uploads.
+     */
+    private suspend fun checkAutoBackupAfterUpload() {
+        try {
+            val app = TgStorageApp.instance
+            val db = app.database
+            val metadataDao = db.metadataDao()
+
+            // Increment counter
+            val currentCount = (metadataDao.getValue(
+                com.tgstorage.data.local.entity.MetadataKeys.UPLOADS_SINCE_BACKUP
+            )?.toIntOrNull() ?: 0) + 1
+
+            val threshold = metadataDao.getValue(
+                com.tgstorage.data.local.entity.MetadataKeys.AUTO_BACKUP_THRESHOLD
+            )?.toIntOrNull() ?: 10
+
+            if (currentCount >= threshold) {
+                // Reset counter and trigger backup
+                metadataDao.setValue(
+                    com.tgstorage.data.local.entity.MetadataEntity(
+                        key = com.tgstorage.data.local.entity.MetadataKeys.UPLOADS_SINCE_BACKUP,
+                        value = "0"
+                    )
+                )
+                android.util.Log.i("TransferManager", "Auto-backup triggered after $currentCount uploads")
+                val backupManager = com.tgstorage.data.sync.BackupManager(app)
+                backupManager.createAndUploadBackup()
+            } else {
+                // Save updated counter
+                metadataDao.setValue(
+                    com.tgstorage.data.local.entity.MetadataEntity(
+                        key = com.tgstorage.data.local.entity.MetadataKeys.UPLOADS_SINCE_BACKUP,
+                        value = currentCount.toString()
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            // Never let backup logic crash the upload flow
+            android.util.Log.e("TransferManager", "Auto-backup check failed", e)
+        }
+    }
 }

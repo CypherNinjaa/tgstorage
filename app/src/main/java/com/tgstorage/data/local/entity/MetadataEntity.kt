@@ -36,6 +36,8 @@ object MetadataKeys {
     const val FORGOT_PASSWORD_MSG_ID = "forgot_password_msg_id" // message_id sent for forgot password
     const val APP_LOCK_ENABLED = "app_lock_enabled" // true/false — whether app lock is active
     const val AUTO_RETRY_ENABLED = "auto_retry_enabled" // true/false — auto retry failed uploads
+    const val UPLOADS_SINCE_BACKUP = "uploads_since_backup" // counter: triggers auto-backup every N uploads
+    const val AUTO_BACKUP_THRESHOLD = "auto_backup_threshold" // number of uploads before auto-backup (default: 10)
 }
 
 /** Backup frequency options. */

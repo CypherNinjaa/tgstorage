@@ -909,13 +909,6 @@ private fun UploadedFileCard(
             }
             // Action buttons (hidden during selection mode)
             if (!isSelectionMode) {
-                // Preview button (eye icon)
-                if (isPreviewable(file.mimeType)) {
-                    IconButton(onClick = onPreview) {
-                        Icon(Icons.Filled.Visibility, "Preview",
-                            tint = MaterialTheme.colorScheme.secondary)
-                    }
-                }
                 // Download button or loading indicator
                 if (isDownloading) {
                     CircularProgressIndicator(
@@ -1035,13 +1028,6 @@ private fun UploadedFileGridItem(
                     modifier = Modifier.weight(1f),
                 )
                 if (!isSelectionMode && !isDownloading) {
-                    if (isPreviewable(file.mimeType)) {
-                        IconButton(onClick = onPreview, modifier = Modifier.size(28.dp)) {
-                            Icon(Icons.Filled.Visibility, "Preview",
-                                tint = MaterialTheme.colorScheme.secondary,
-                                modifier = Modifier.size(18.dp))
-                        }
-                    }
                     IconButton(onClick = onDownload, modifier = Modifier.size(28.dp)) {
                         Icon(Icons.Filled.Download, "Download",
                             tint = MaterialTheme.colorScheme.primary)

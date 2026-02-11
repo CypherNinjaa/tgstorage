@@ -11,6 +11,7 @@ import com.tgstorage.data.local.entity.MetadataKeys
 import com.tgstorage.data.local.entity.SyncStatus
 import com.tgstorage.data.local.entity.SyncStateEntity
 import com.tgstorage.data.remote.TelegramApiService
+import com.tgstorage.data.repository.BotRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,6 +52,7 @@ class ChunkManager(
     private val syncStateDao: SyncStateDao,
     private val fileDao: FileDao,
     private val metadataDao: MetadataDao,
+    private val botRepository: BotRepository? = null,
 ) {
     companion object {
         // REDUCED TO 10MB: For safer uploads and downloads within Telegram limits.
@@ -327,8 +329,6 @@ class ChunkManager(
             if (chunks.isEmpty()) throw IllegalStateException("No chunks found for file $fileId. The file may not have been uploaded through this app.")
 
             // Check if any chunk exceeds Telegram's 20MB download limit
-            // This happens for files that were uploaded as single documents (20-50MB)
-            // before we fixed the chunking threshold
             val oversizedChunks = chunks.filter { it.size > TELEGRAM_DOWNLOAD_LIMIT }
             if (oversizedChunks.isNotEmpty()) {
                 val sizeInMB = oversizedChunks.first().size / (1024 * 1024)
@@ -338,6 +338,9 @@ class ChunkManager(
                     "Please delete it from the cloud and re-upload to enable downloading."
                 )
             }
+
+            // Get chat_id for file_id recovery
+            val chatId = metadataDao.getValue(com.tgstorage.data.local.entity.MetadataKeys.CHAT_ID)
 
             val totalBytes = chunks.sumOf { it.size }
             progressFlow.value = progressFlow.value.copy(
@@ -357,10 +360,8 @@ class ChunkManager(
                     val tgFileId = chunk.telegramFileId
                         ?: throw IllegalStateException("Chunk ${chunk.chunkIndex} has no Telegram file_id")
 
-                    // Get file path (cached — avoids redundant API calls)
-                    val filePath = retryWithBackoff(MAX_RETRIES) {
-                        api.getFilePathCached(token, tgFileId).getOrThrow()
-                    }
+                    // Get file path with automatic stale file_id recovery
+                    val filePath = getFilePathWithRecovery(token, chatId, chunk, tgFileId)
 
                     // Stream download to temp file then read bytes for decrypt/verify
                     val tempChunkFile = File(context.cacheDir, "dl_chunk_${fileId}_${chunk.chunkIndex}")
@@ -414,6 +415,152 @@ class ChunkManager(
                 else TransferStatus.FAILED,
                 error = e.message,
             )
+        }
+    }
+
+    // ─── File ID Recovery ──────────────────────────────
+
+    /**
+     * Attempts getFilePathCached first; if it fails with a stale file_id error,
+     * tries recovery via forwardMessage with ALL available bots.
+     * Priority: uploading bot (chunk.botId) → other active bots → primary token.
+     */
+    private suspend fun getFilePathWithRecovery(
+        token: String,
+        chatId: String?,
+        chunk: com.tgstorage.data.local.entity.ChunkEntity,
+        currentFileId: String,
+    ): String {
+        // First try: normal cached path
+        val firstTry = api.getFilePathCached(token, currentFileId)
+        if (firstTry.isSuccess) return firstTry.getOrThrow()
+
+        val error = firstTry.exceptionOrNull()
+        val errorMsg = error?.message ?: ""
+
+        // Only attempt recovery for stale file_id errors
+        if (!FileRecoveryManager.isStaleFileIdError(errorMsg)) throw error!!
+
+        val resolvedChatId = chatId
+            ?: throw IllegalStateException("Cannot recover file_id: chat_id not configured")
+        val messageId = chunk.telegramMessageId
+            ?: throw IllegalStateException(
+                "Cannot recover: no message_id stored for this chunk. " +
+                "The file may need to be re-uploaded."
+            )
+
+        android.util.Log.w("ChunkManager", "Stale file_id for chunk ${chunk.chunkIndex}, trying all bots...")
+
+        // Build ordered list of (bot, token) to try: uploading bot first, then all others
+        val botsToTry = buildRecoveryBotList(token, chunk.botId)
+
+        for ((botLabel, botToken) in botsToTry) {
+            val newFileId = tryForwardRecovery(botToken, resolvedChatId, messageId, chunk)
+            if (newFileId != null) {
+                android.util.Log.i("ChunkManager", "Recovery via $botLabel succeeded for chunk ${chunk.chunkIndex}")
+                return api.getFilePathCached(botToken, newFileId).getOrThrow()
+            }
+        }
+
+        throw IllegalStateException(
+            "File recovery failed for all bots. The original message (ID $messageId) " +
+            "may have been deleted from the channel. " +
+            "Try re-uploading the file from your device."
+        )
+    }
+
+    /**
+     * Build an ordered list of bot tokens to try for recovery.
+     * 1. The uploading bot (chunk.botId) — most likely to see the message
+     * 2. The token passed to download (current bot)
+     * 3. All other active bots
+     * 4. Primary bot token from metadata
+     */
+    private suspend fun buildRecoveryBotList(
+        currentToken: String,
+        uploadingBotId: Long?,
+    ): List<Pair<String, String>> {
+        val result = mutableListOf<Pair<String, String>>()
+        val usedTokens = mutableSetOf<String>()
+
+        // 1. Try the uploading bot first
+        if (uploadingBotId != null && botRepository != null) {
+            val uploadToken = botRepository.getDecryptedToken(uploadingBotId)
+            if (uploadToken != null && usedTokens.add(uploadToken)) {
+                result.add("uploading-bot" to uploadToken)
+            }
+        }
+
+        // 2. Current download token
+        if (usedTokens.add(currentToken)) {
+            result.add("current-bot" to currentToken)
+        }
+
+        // 3. All other active bots
+        if (botRepository != null) {
+            for ((bot, botToken) in botRepository.getActiveBotsWithTokens()) {
+                if (usedTokens.add(botToken)) {
+                    result.add("bot-${bot.name}" to botToken)
+                }
+            }
+        }
+
+        // 4. Primary token from metadata
+        val encToken = metadataDao.getValue(com.tgstorage.data.local.entity.MetadataKeys.BOT_TOKEN)
+        if (encToken != null) {
+            val primaryToken = runCatching {
+                com.tgstorage.common.security.CryptoManager.decrypt(
+                    android.util.Base64.decode(encToken, android.util.Base64.NO_WRAP)
+                ).decodeToString()
+            }.getOrNull()
+            if (primaryToken != null && usedTokens.add(primaryToken)) {
+                result.add("primary-bot" to primaryToken)
+            }
+        }
+
+        return result
+    }
+
+    /**
+     * Try to recover a chunk's file_id using forwardMessage.
+     * Returns the new file_id, or null if this bot can't recover it.
+     */
+    private suspend fun tryForwardRecovery(
+        token: String,
+        chatId: String,
+        messageId: Long,
+        chunk: com.tgstorage.data.local.entity.ChunkEntity,
+    ): String? {
+        return try {
+            val forwardResult = api.forwardMessage(token, chatId, chatId, messageId)
+            val forwarded = forwardResult.getOrNull()
+
+            if (forwarded == null) {
+                // forwardMessage failed, check if the error is "message not found"
+                val err = forwardResult.exceptionOrNull()?.message?.lowercase() ?: ""
+                if (err.contains("not found") || err.contains("message to forward")) {
+                    android.util.Log.w("ChunkManager", "Message $messageId not found with this bot")
+                } else {
+                    android.util.Log.w("ChunkManager", "forwardMessage failed: $err")
+                }
+                return null
+            }
+
+            val newFileId = forwarded.document?.fileId ?: return null
+
+            // Update DB with fresh file_id
+            chunkDao.updateChunkFileId(chunk.id, newFileId)
+            forwarded.document.fileUniqueId?.let { uid ->
+                chunkDao.updateChunkFileUniqueId(chunk.id, uid)
+            }
+
+            // Cleanup forwarded copy
+            runCatching { api.deleteMessage(token, chatId, forwarded.messageId) }
+
+            newFileId
+        } catch (e: Exception) {
+            android.util.Log.w("ChunkManager", "Recovery attempt failed: ${e.message}")
+            null
         }
     }
 

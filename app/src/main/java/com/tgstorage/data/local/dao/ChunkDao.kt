@@ -22,6 +22,19 @@ interface ChunkDao {
     @Query("DELETE FROM chunks WHERE file_id = :fileId")
     suspend fun deleteChunksForFile(fileId: Long)
 
+    /**
+     * Update a chunk's telegram_file_id (used by FileRecoveryManager
+     * when refreshing stale file_ids via forwardMessage).
+     */
+    @Query("UPDATE chunks SET telegram_file_id = :newFileId WHERE id = :chunkId")
+    suspend fun updateChunkFileId(chunkId: Long, newFileId: String)
+
+    /**
+     * Update a chunk's file_unique_id for future-proofing.
+     */
+    @Query("UPDATE chunks SET telegram_file_unique_id = :uniqueId WHERE id = :chunkId")
+    suspend fun updateChunkFileUniqueId(chunkId: Long, uniqueId: String)
+
     /** Total chunk count across all files */
     @Query("SELECT COUNT(*) FROM chunks")
     fun getTotalChunkCount(): Flow<Int>

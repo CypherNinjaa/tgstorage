@@ -546,10 +546,11 @@ class MultiBotUploadManager(
             val tgFileId = chunk.telegramFileId
                 ?: throw IllegalStateException("Chunk has no Telegram file_id")
 
-            // Use cached file path to avoid redundant API calls
-            val filePath = retryWithBackoff(MAX_RETRIES) {
-                api.getFilePathCached(token, tgFileId).getOrThrow()
-            }
+            // Get chat_id for file_id recovery
+            val chatId = metadataDao.getValue(MetadataKeys.CHAT_ID)
+
+            // Get file path with automatic stale file_id recovery
+            val filePath = getFilePathWithRecovery(token, chatId, chunk, tgFileId)
 
             // Stream download to temp file, then decrypt/verify
             val tempFile = File(context.cacheDir, "dl_single_${chunk.fileId}_${System.currentTimeMillis()}")
@@ -607,10 +608,11 @@ class MultiBotUploadManager(
                     val tgFileId = chunk.telegramFileId
                         ?: throw IllegalStateException("Chunk ${chunk.chunkIndex} has no file_id")
 
-                    // Use cached file path
-                    val filePath = retryWithBackoff(MAX_RETRIES) {
-                        api.getFilePathCached(token, tgFileId).getOrThrow()
-                    }
+                    // Get chat_id for file_id recovery
+                    val chatId = metadataDao.getValue(MetadataKeys.CHAT_ID)
+
+                    // Get file path with automatic stale file_id recovery
+                    val filePath = getFilePathWithRecovery(token, chatId, chunk, tgFileId)
 
                     // Stream download to temp file
                     val tempFile = File(context.cacheDir, "dl_seq_${chunks.first().fileId}_${chunk.chunkIndex}")
@@ -691,10 +693,11 @@ class MultiBotUploadManager(
                             val tgFileId = chunk.telegramFileId
                                 ?: throw IllegalStateException("Chunk ${chunk.chunkIndex} has no file_id")
 
-                            // Use cached file path
-                            val filePath = retryWithBackoff(MAX_RETRIES) {
-                                api.getFilePathCached(token, tgFileId).getOrThrow()
-                            }
+                            // Get chat_id for file_id recovery
+                            val chatId = metadataDao.getValue(MetadataKeys.CHAT_ID)
+
+                            // Get file path with automatic stale file_id recovery
+                            val filePath = getFilePathWithRecovery(token, chatId, chunk, tgFileId)
 
                             // Stream download to temp file
                             val tempDlFile = File(tempDir, "dl_${chunk.chunkIndex}")
@@ -832,6 +835,133 @@ class MultiBotUploadManager(
     private fun computeSha256(bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-256")
         return digest.digest(bytes).joinToString("") { "%02x".format(it) }
+    }
+
+    // ─── File ID Recovery ──────────────────────────────
+
+    /**
+     * Tries getFilePathCached first; on stale file_id, recovers via forwardMessage
+     * trying ALL available bots. Priority: uploading bot → current bot → all others.
+     */
+    private suspend fun getFilePathWithRecovery(
+        token: String,
+        chatId: String?,
+        chunk: ChunkEntity,
+        currentFileId: String,
+    ): String {
+        val firstTry = api.getFilePathCached(token, currentFileId)
+        if (firstTry.isSuccess) return firstTry.getOrThrow()
+
+        val error = firstTry.exceptionOrNull()
+        val errorMsg = error?.message ?: ""
+
+        if (!FileRecoveryManager.isStaleFileIdError(errorMsg)) throw error!!
+
+        val resolvedChatId = chatId
+            ?: throw IllegalStateException("Cannot recover file_id: chat_id not configured")
+        val messageId = chunk.telegramMessageId
+            ?: throw IllegalStateException(
+                "Cannot recover: no message_id stored for this chunk. " +
+                "The file may need to be re-uploaded."
+            )
+
+        android.util.Log.w("MultiBotUploadManager", "Stale file_id for chunk ${chunk.chunkIndex}, trying all bots...")
+
+        // Build ordered list: uploading bot first, then current, then all others
+        val botsToTry = buildRecoveryBotList(token, chunk.botId)
+
+        for ((botLabel, botToken) in botsToTry) {
+            val newFileId = tryForwardRecovery(botToken, resolvedChatId, messageId, chunk)
+            if (newFileId != null) {
+                android.util.Log.i("MultiBotUploadManager", "Recovery via $botLabel succeeded for chunk ${chunk.chunkIndex}")
+                return api.getFilePathCached(botToken, newFileId).getOrThrow()
+            }
+        }
+
+        throw IllegalStateException(
+            "File recovery failed for all bots. The original message (ID $messageId) " +
+            "may have been deleted from the channel. " +
+            "Try re-uploading the file from your device."
+        )
+    }
+
+    private suspend fun buildRecoveryBotList(
+        currentToken: String,
+        uploadingBotId: Long?,
+    ): List<Pair<String, String>> {
+        val result = mutableListOf<Pair<String, String>>()
+        val usedTokens = mutableSetOf<String>()
+
+        // 1. Uploading bot first
+        if (uploadingBotId != null) {
+            val uploadToken = botRepository.getDecryptedToken(uploadingBotId)
+            if (uploadToken != null && usedTokens.add(uploadToken)) {
+                result.add("uploading-bot" to uploadToken)
+            }
+        }
+
+        // 2. Current download token
+        if (usedTokens.add(currentToken)) {
+            result.add("current-bot" to currentToken)
+        }
+
+        // 3. All other active bots
+        for ((bot, botToken) in botRepository.getActiveBotsWithTokens()) {
+            if (usedTokens.add(botToken)) {
+                result.add("bot-${bot.name}" to botToken)
+            }
+        }
+
+        // 4. Primary token from metadata
+        val encToken = metadataDao.getValue(MetadataKeys.BOT_TOKEN)
+        if (encToken != null) {
+            val primaryToken = runCatching {
+                com.tgstorage.common.security.CryptoManager.decrypt(
+                    android.util.Base64.decode(encToken, android.util.Base64.NO_WRAP)
+                ).decodeToString()
+            }.getOrNull()
+            if (primaryToken != null && usedTokens.add(primaryToken)) {
+                result.add("primary-bot" to primaryToken)
+            }
+        }
+
+        return result
+    }
+
+    private suspend fun tryForwardRecovery(
+        token: String,
+        chatId: String,
+        messageId: Long,
+        chunk: ChunkEntity,
+    ): String? {
+        return try {
+            val forwardResult = api.forwardMessage(token, chatId, chatId, messageId)
+            val forwarded = forwardResult.getOrNull()
+
+            if (forwarded == null) {
+                val err = forwardResult.exceptionOrNull()?.message?.lowercase() ?: ""
+                if (err.contains("not found") || err.contains("message to forward")) {
+                    android.util.Log.w("MultiBotUploadManager", "Message $messageId not found with this bot")
+                } else {
+                    android.util.Log.w("MultiBotUploadManager", "forwardMessage failed: $err")
+                }
+                return null
+            }
+
+            val newFileId = forwarded.document?.fileId ?: return null
+
+            chunkDao.updateChunkFileId(chunk.id, newFileId)
+            forwarded.document.fileUniqueId?.let { uid ->
+                chunkDao.updateChunkFileUniqueId(chunk.id, uid)
+            }
+
+            runCatching { api.deleteMessage(token, chatId, forwarded.messageId) }
+
+            newFileId
+        } catch (e: Exception) {
+            android.util.Log.w("MultiBotUploadManager", "Recovery attempt failed: ${e.message}")
+            null
+        }
     }
 
     private fun secureDelete(file: File) {

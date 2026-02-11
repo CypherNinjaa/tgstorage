@@ -23,7 +23,7 @@ import com.tgstorage.data.local.entity.SyncStateEntity
         MetadataEntity::class,
         BotEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 abstract class TgStorageDatabase : RoomDatabase() {
@@ -77,6 +77,14 @@ abstract class TgStorageDatabase : RoomDatabase() {
                 
                 // Create index on bot_id for faster lookups
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_chunks_bot_id ON chunks(bot_id)")
+            }
+        }
+
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Add file_unique_id column for recovery/future-proofing.
+                // file_unique_id is permanent (unlike file_id which can go stale).
+                db.execSQL("ALTER TABLE chunks ADD COLUMN telegram_file_unique_id TEXT DEFAULT NULL")
             }
         }
     }
