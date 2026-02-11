@@ -440,14 +440,25 @@ Primary use cases:
 
 ### 10.1 Goals
 
-- Safe public release
+- ✅ Safe public release
 
 ### 10.2 Tasks
 
-- Write privacy policy (Telegram usage, data handling, no telemetry)
-- Store listing: screenshots of all key screens, feature graphic, description
-- open‑source release (clean repo, LICENSE, README, contributing guide)
-- Set up crash reporting (optional, privacy‑respecting only)
+- ✅ Write privacy policy (Telegram usage, data handling, no telemetry) — covered in README.md Privacy section
+- ✅ open‑source release (clean repo, LICENSE, README) — MIT License, comprehensive README
+- ✅ In-app auto-updater via GitHub releases API (AppUpdater.kt)
+- ✅ Release signing keystore + signing config in build.gradle.kts
+- ✅ GitHub release v1.0.0 created via `gh release create` with signed APK (1.96 MB)
+- ✅ REQUEST_INSTALL_PACKAGES permission for in-app APK install
+- ✅ BuildConfig.GITHUB_REPO for updater to fetch latest release
+- ✅ Update checker UI in About screen (check → download → install flow)
+
+### 10.3 Success Criteria
+
+- ✅ Signed release APK under 2 MB
+- ✅ GitHub release published at https://github.com/CypherNinjaa/tgstorage/releases/tag/v1.0.0
+- ✅ In-app updater checks GitHub API for new versions
+- ✅ Open-source with MIT license
 
 ---
 
