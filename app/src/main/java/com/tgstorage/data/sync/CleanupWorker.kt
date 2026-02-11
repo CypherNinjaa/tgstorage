@@ -77,8 +77,22 @@ class CleanupWorker(
                 deletedCount++
             }
         }
+        
+        // 3. Clean stale upload temp files (from content:// URI copies)
+        val uploadTempDir = File(applicationContext.cacheDir, "upload_temp")
+        if (uploadTempDir.exists()) {
+            val now = System.currentTimeMillis()
+            uploadTempDir.listFiles()?.forEach { file ->
+                // Delete temp files older than 1 hour (should be deleted immediately after upload)
+                if (file.isFile && (now - file.lastModified()) > 60 * 60 * 1000) {
+                    file.delete()
+                    deletedCount++
+                    Log.d(TAG, "Deleted stale upload temp: ${file.name}")
+                }
+            }
+        }
 
-        // 3. Clean imported temp dir
+        // 4. Clean imported temp dir (legacy - for backward compatibility)
         val importedDir = File(applicationContext.filesDir, "imported")
         if (importedDir.exists()) {
             val db = TgStorageApp.instance.database

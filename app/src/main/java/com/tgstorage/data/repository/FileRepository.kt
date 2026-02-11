@@ -53,8 +53,9 @@ class FileRepository(
     // ── Import from content URI ────────────────────────
 
     /**
-     * Copies a file from a content:// URI into app-private storage,
-     * computes SHA-256, records in Room, and creates a sync_state entry.
+     * Registers a file for upload by storing its URI reference.
+     * NO COPYING - we upload directly from the original location.
+     * SHA-256 is computed on-demand during upload.
      */
     suspend fun importFile(uri: Uri): Result<FileEntity> = withContext(Dispatchers.IO) {
         runCatching {
@@ -62,24 +63,45 @@ class FileRepository(
             val (displayName, fileSize) = resolveFileMetadata(uri)
             val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
 
-            // Copy to app-private files dir
-            val storageDir = File(context.filesDir, "imported")
-            if (!storageDir.exists()) storageDir.mkdirs()
-            val destFile = File(storageDir, "${System.currentTimeMillis()}_$displayName")
-
-            val sha256 = copyAndHash(uri, destFile)
-
+            // Store the URI directly - NO COPY
+            // SHA-256 will be computed during upload to avoid double-read
             val entity = FileEntity(
                 name = displayName,
-                size = destFile.length(),
+                size = fileSize,
                 mimeType = mimeType,
-                sha256 = sha256,
-                localUri = destFile.absolutePath,
+                sha256 = "", // Will be computed during upload
+                localUri = uri.toString(), // Store URI, not file path
             )
 
             val id = fileDao.insertFile(entity)
 
             // Create initial sync state
+            syncStateDao.insertOrUpdate(
+                SyncStateEntity(
+                    fileId = id,
+                    status = SyncStatus.PENDING_UPLOAD,
+                )
+            )
+
+            entity.copy(id = id)
+        }
+    }
+    
+    /**
+     * Registers a file from a file path (for files we have direct path access to).
+     */
+    suspend fun importFileFromPath(filePath: String, name: String, size: Long, mimeType: String): Result<FileEntity> = withContext(Dispatchers.IO) {
+        runCatching {
+            val entity = FileEntity(
+                name = name,
+                size = size,
+                mimeType = mimeType,
+                sha256 = "", // Will be computed during upload
+                localUri = filePath,
+            )
+
+            val id = fileDao.insertFile(entity)
+
             syncStateDao.insertOrUpdate(
                 SyncStateEntity(
                     fileId = id,
@@ -116,23 +138,5 @@ class FileRepository(
             }
         }
         return name to size
-    }
-
-    /**
-     * Copies content from [uri] to [dest], returning the hex SHA-256 hash.
-     */
-    private fun copyAndHash(uri: Uri, dest: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            FileOutputStream(dest).use { output ->
-                val buffer = ByteArray(8192)
-                var bytesRead: Int
-                while (input.read(buffer).also { bytesRead = it } != -1) {
-                    output.write(buffer, 0, bytesRead)
-                    digest.update(buffer, 0, bytesRead)
-                }
-            }
-        } ?: error("Cannot open input stream for $uri")
-        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 }

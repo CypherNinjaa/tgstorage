@@ -36,6 +36,11 @@ import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PauseCircle
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.VideoFile
@@ -103,14 +108,43 @@ fun TransferQueueScreen(
     var infoSheet by remember { mutableStateOf<TransferInfoSheetData?>(null) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
+    // Check transfer states for button visibility
+    val hasActiveToPause = state.transfers.any {
+        it.status == TransferStatus.IN_PROGRESS || it.status == TransferStatus.PENDING
+    }
+    val hasPausedToResume = state.transfers.any { it.status == TransferStatus.PAUSED }
+    val hasFailedToRetry = state.transfers.any { it.status == TransferStatus.FAILED }
+    val hasFinishedToClear = state.transfers.any { !viewModel.isActive(it) }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Transfers") },
                 actions = {
-                    if (state.selectedTab == 0 && state.transfers.any { !viewModel.isActive(it) }) {
-                        IconButton(onClick = viewModel::clearFinished) {
-                            Icon(Icons.Filled.DeleteSweep, "Clear finished")
+                    if (state.selectedTab == 0) {
+                        // Pause all button
+                        if (hasActiveToPause) {
+                            IconButton(onClick = viewModel::pauseAll) {
+                                Icon(Icons.Filled.PauseCircle, "Pause all")
+                            }
+                        }
+                        // Resume all button
+                        if (hasPausedToResume) {
+                            IconButton(onClick = viewModel::resumeAll) {
+                                Icon(Icons.Filled.PlayCircle, "Resume all")
+                            }
+                        }
+                        // Retry all failed button
+                        if (hasFailedToRetry) {
+                            IconButton(onClick = viewModel::retryAllFailed) {
+                                Icon(Icons.Filled.Refresh, "Retry all failed")
+                            }
+                        }
+                        // Clear finished button
+                        if (hasFinishedToClear) {
+                            IconButton(onClick = viewModel::clearFinished) {
+                                Icon(Icons.Filled.DeleteSweep, "Clear finished")
+                            }
                         }
                     }
                 },
@@ -143,14 +177,24 @@ fun TransferQueueScreen(
             // ── Tab content ─────────────────────────────
             when (state.selectedTab) {
                 0 -> TransfersTab(
-                    transfers = state.transfers,
+                    transfers = state.transfersDisplayed,
+                    totalCount = state.transfersTotalCount,
+                    hasMore = state.hasMoreTransfers,
+                    onLoadMore = viewModel::loadMoreTransfers,
                     isActive = viewModel::isActive,
                     onCancel = { viewModel.cancelTransfer(it.fileId, it.type) },
+                    onPause = { viewModel.pauseTransfer(it.fileId, it.type) },
+                    onResume = { viewModel.resumeTransfer(it.fileId, it.type) },
+                    onRetry = { viewModel.retryTransfer(it.fileId, it.type) },
                     searchQuery = state.transferSearchQuery,
                     onSearchChange = viewModel::onTransferSearchChange,
                     filter = state.transferFilter,
                     onFilterChange = viewModel::onTransferFilterChange,
                     onShowInfo = { infoSheet = it },
+                    syncPending = state.syncPendingCount,
+                    syncUploaded = state.syncUploadedCount,
+                    syncFailed = state.syncFailedCount,
+                    syncTotal = state.syncTotalCount,
                 )
                 1 -> UploadedTab(
                     files = state.uploadedFiles,
@@ -206,19 +250,28 @@ private data class TransferInfoSheetData(
 @Composable
 private fun TransfersTab(
     transfers: List<TransferProgress>,
+    totalCount: Int,
+    hasMore: Boolean,
+    onLoadMore: () -> Unit,
     isActive: (TransferProgress) -> Boolean,
     onCancel: (TransferProgress) -> Unit,
+    onPause: (TransferProgress) -> Unit,
+    onResume: (TransferProgress) -> Unit,
+    onRetry: (TransferProgress) -> Unit,
     searchQuery: String,
     onSearchChange: (String) -> Unit,
     filter: TransferFileFilter,
     onFilterChange: (TransferFileFilter) -> Unit,
     onShowInfo: (TransferInfoSheetData) -> Unit,
+    syncPending: Int,
+    syncUploaded: Int,
+    syncFailed: Int,
+    syncTotal: Int,
 ) {
+    // Filtering & pagination now done in ViewModel, transfers is already filtered
     val filtered = transfers
-        .filter { matchesQuery(it.fileName, searchQuery) }
-        .filter { matchesMimeFilter(it.mimeType, filter) }
 
-    if (transfers.isEmpty()) {
+    if (totalCount == 0 && transfers.isEmpty()) {
         Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
             SearchAndFilterRow(
                 query = searchQuery,
@@ -227,6 +280,15 @@ private fun TransfersTab(
                 onFilterChange = onFilterChange,
                 placeholder = "Search transfers...",
             )
+            // Sync summary even when no active transfers
+            if (syncTotal > 0) {
+                SyncSummaryCard(
+                    pending = syncPending,
+                    uploaded = syncUploaded,
+                    failed = syncFailed,
+                    total = syncTotal,
+                )
+            }
             Spacer(Modifier.height(24.dp))
             EmptyState(
                 icon = Icons.Outlined.SwapVert,
@@ -244,6 +306,14 @@ private fun TransfersTab(
                 onFilterChange = onFilterChange,
                 placeholder = "Search transfers...",
             )
+            if (syncTotal > 0) {
+                SyncSummaryCard(
+                    pending = syncPending,
+                    uploaded = syncUploaded,
+                    failed = syncFailed,
+                    total = syncTotal,
+                )
+            }
             Spacer(Modifier.height(24.dp))
             EmptyState(
                 icon = Icons.Outlined.SwapVert,
@@ -276,6 +346,18 @@ private fun TransfersTab(
                 }
             }
 
+            // ── Sync summary card ──────────────────────
+            if (syncTotal > 0) {
+                item(key = "sync_summary") {
+                    SyncSummaryCard(
+                        pending = syncPending,
+                        uploaded = syncUploaded,
+                        failed = syncFailed,
+                        total = syncTotal,
+                    )
+                }
+            }
+
             if (active.isNotEmpty()) {
                 item {
                     Text("Active", style = MaterialTheme.typography.titleSmall,
@@ -285,6 +367,9 @@ private fun TransfersTab(
                     TransferCard(
                         progress = transfer,
                         onCancel = { onCancel(transfer) },
+                        onPause = { onPause(transfer) },
+                        onResume = { onResume(transfer) },
+                        onRetry = null,
                         onShowInfo = onShowInfo,
                     )
                 }
@@ -296,7 +381,28 @@ private fun TransfersTab(
                         fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp))
                 }
                 items(finished, key = { "${it.fileId}_${it.type}_done" }) { transfer ->
-                    TransferCard(progress = transfer, onCancel = null, onShowInfo = onShowInfo)
+                    TransferCard(
+                        progress = transfer,
+                        onCancel = null,
+                        onPause = null,
+                        onResume = null,
+                        onRetry = if (transfer.status == TransferStatus.FAILED) {{ onRetry(transfer) }} else null,
+                        onShowInfo = onShowInfo,
+                    )
+                }
+            }
+
+            // Load more button if there are more transfers
+            if (hasMore) {
+                item(key = "load_more_transfers") {
+                    androidx.compose.material3.OutlinedButton(
+                        onClick = onLoadMore,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                    ) {
+                        Text("Load More (${transfers.size} of $totalCount)")
+                    }
                 }
             }
 
@@ -871,6 +977,9 @@ private fun matchesMimeFilter(mimeType: String, filter: TransferFileFilter): Boo
 private fun TransferCard(
     progress: TransferProgress,
     onCancel: (() -> Unit)?,
+    onPause: (() -> Unit)?,
+    onResume: (() -> Unit)?,
+    onRetry: (() -> Unit)?,
     onShowInfo: (TransferInfoSheetData) -> Unit,
 ) {
     Card(
@@ -929,12 +1038,43 @@ private fun TransferCard(
                     color = MaterialTheme.colorScheme.error)
             }
 
-            if (onCancel != null) {
+            // Action buttons row
+            val hasActions = onCancel != null || onPause != null || onResume != null || onRetry != null
+            if (hasActions) {
                 Spacer(Modifier.height(8.dp))
-                TextButton(onClick = onCancel) {
-                    Icon(Icons.Filled.Cancel, null, Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Cancel")
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // Pause button (only for IN_PROGRESS)
+                    if (onPause != null && progress.status == TransferStatus.IN_PROGRESS) {
+                        TextButton(onClick = onPause) {
+                            Icon(Icons.Filled.Pause, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Pause")
+                        }
+                    }
+                    // Resume button (only for PAUSED)
+                    if (onResume != null && progress.status == TransferStatus.PAUSED) {
+                        TextButton(onClick = onResume) {
+                            Icon(Icons.Filled.PlayArrow, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Resume")
+                        }
+                    }
+                    // Cancel button
+                    if (onCancel != null) {
+                        TextButton(onClick = onCancel) {
+                            Icon(Icons.Filled.Cancel, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Cancel")
+                        }
+                    }
+                    // Retry button (only for FAILED)
+                    if (onRetry != null) {
+                        TextButton(onClick = onRetry) {
+                            Icon(Icons.Filled.Refresh, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Retry")
+                        }
+                    }
                 }
             }
         }
@@ -965,6 +1105,70 @@ private fun StatusChip(status: TransferStatus) {
             labelColor = color, leadingIconContentColor = color,
         ),
     )
+}
+
+// ─── Sync summary card (merged from SyncDashboard) ─────
+
+@Composable
+private fun SyncSummaryCard(
+    pending: Int,
+    uploaded: Int,
+    failed: Int,
+    total: Int,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.CloudUpload, null, Modifier.size(24.dp),
+                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    "Sync Overview",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+            ) {
+                SyncStatItem(label = "Total", value = total.toString())
+                SyncStatItem(label = "Uploaded", value = uploaded.toString())
+                SyncStatItem(label = "Pending", value = pending.toString())
+                SyncStatItem(label = "Failed", value = failed.toString())
+            }
+            if (total > 0) {
+                Spacer(Modifier.height(8.dp))
+                val fraction = if (total > 0) uploaded.toFloat() / total else 0f
+                LinearProgressIndicator(progress = { fraction.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
+@Composable
+private fun SyncStatItem(label: String, value: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            value,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+        )
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f),
+        )
+    }
 }
 
 private fun formatSize(bytes: Long): String = when {

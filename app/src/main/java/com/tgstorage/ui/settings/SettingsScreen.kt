@@ -1,5 +1,7 @@
 package com.tgstorage.ui.settings
 
+import android.app.Activity
+import android.os.Build
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -18,7 +20,10 @@ import androidx.compose.material.icons.outlined.Backup
 import androidx.compose.material.icons.outlined.Brush
 import androidx.compose.material.icons.outlined.Cached
 import androidx.compose.material.icons.outlined.Cloud
+import androidx.compose.material.icons.outlined.CloudUpload
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.PieChart
 import androidx.compose.material.icons.outlined.Security
@@ -41,11 +46,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.tgstorage.ui.components.LoadingState
+import com.tgstorage.util.StoragePermissionHelper
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -130,6 +139,31 @@ fun SettingsScreen(
                     },
                 )
             }
+            item {
+                SettingsRow(
+                    icon = Icons.Outlined.CloudUpload,
+                    title = "Pending uploads",
+                    subtitle = if (state.pendingUploadBytes > 0) 
+                        "${formatSize(state.pendingUploadBytes)} (files waiting to upload)"
+                    else "No pending files",
+                    trailing = {
+                        if (state.pendingUploadBytes > 0) {
+                            TextButton(
+                                onClick = viewModel::clearPendingUploads, 
+                                enabled = !state.isClearingPending
+                            ) {
+                                Text(if (state.isClearingPending) "Clearing..." else "Clear")
+                            }
+                        }
+                    },
+                )
+            }
+            // Full storage access for documents on Android 11+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                item {
+                    FullStorageAccessRow()
+                }
+            }
             item { HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp)) }
 
             item { SectionHeader("Sync") }
@@ -162,6 +196,15 @@ fun SettingsScreen(
                     onClick = onNavigateToSecurity,
                 )
             }
+            item {
+                SettingsToggleRow(
+                    icon = Icons.Outlined.Lock,
+                    title = "App Lock",
+                    subtitle = if (state.appLockEnabled) "Passphrase required on launch" else "No lock on launch",
+                    checked = state.appLockEnabled,
+                    onCheckedChange = viewModel::setAppLockEnabled,
+                )
+            }
             item { HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp)) }
 
             item { SectionHeader("Appearance") }
@@ -190,14 +233,6 @@ fun SettingsScreen(
             item { HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp)) }
 
             item { SectionHeader("More") }
-            item {
-                SettingsItem(
-                    icon = Icons.Outlined.Sync,
-                    title = "Sync Dashboard",
-                    subtitle = "View sync status and trigger manual sync",
-                    onClick = onNavigateToSync,
-                )
-            }
             item {
                 SettingsItem(
                     icon = Icons.Outlined.Backup,
@@ -331,5 +366,62 @@ private fun SettingsItem(
             )
         },
         modifier = Modifier.clickable(onClick = onClick),
+    )
+}
+
+/**
+ * Full Storage Access toggle for Android 11+ (MANAGE_EXTERNAL_STORAGE).
+ * Required to access all documents, not just media files.
+ */
+@Composable
+private fun FullStorageAccessRow() {
+    val context = LocalContext.current
+    var hasFullAccess by remember { mutableStateOf(StoragePermissionHelper.hasFullStorageAccess()) }
+    
+    // Refresh status when composable becomes visible
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { }
+    }
+    
+    ListItem(
+        headlineContent = { 
+            Text(text = "Full Storage Access", style = MaterialTheme.typography.bodyLarge) 
+        },
+        supportingContent = { 
+            Text(
+                text = if (hasFullAccess) 
+                    "Enabled — can access all files including documents" 
+                else 
+                    "Required to browse and backup documents",
+                style = MaterialTheme.typography.bodyMedium,
+            ) 
+        },
+        leadingContent = { 
+            Icon(imageVector = Icons.Outlined.Folder, contentDescription = null) 
+        },
+        trailingContent = {
+            if (hasFullAccess) {
+                Icon(
+                    imageVector = Icons.Filled.Visibility,
+                    contentDescription = "Enabled",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            } else {
+                TextButton(onClick = {
+                    (context as? Activity)?.let { activity ->
+                        StoragePermissionHelper.requestFullStorageAccess(activity)
+                    }
+                }) {
+                    Text("Enable")
+                }
+            }
+        },
+        modifier = Modifier.clickable {
+            if (!hasFullAccess) {
+                (context as? Activity)?.let { activity ->
+                    StoragePermissionHelper.requestFullStorageAccess(activity)
+                }
+            }
+        },
     )
 }

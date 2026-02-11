@@ -62,6 +62,14 @@ interface FileDao {
     @Query("SELECT f.name FROM files f INNER JOIN sync_state s ON f.id = s.file_id WHERE s.status = 'uploaded'")
     fun getUploadedFileNames(): Flow<List<String>>
 
+    /** Sync version for background workers */
+    @Query("SELECT f.name FROM files f INNER JOIN sync_state s ON f.id = s.file_id WHERE s.status = 'uploaded'")
+    suspend fun getUploadedFileNamesSync(): List<String>
+
+    /** Get ALL file names in database (uploaded, pending, failed) - for auto-backup deduplication */
+    @Query("SELECT name FROM files")
+    suspend fun getAllFileNamesSync(): List<String>
+
     @Query("SELECT f.* FROM files f INNER JOIN sync_state s ON f.id = s.file_id WHERE s.status = 'uploaded' ORDER BY f.updated_at DESC")
     fun getUploadedFiles(): Flow<List<FileEntity>>
 

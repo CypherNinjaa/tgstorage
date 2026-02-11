@@ -1,8 +1,7 @@
 package com.tgstorage.ui.home
 
-import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
-import android.os.Build
 import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -27,6 +26,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.PlayCircleOutline
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SelectAll
@@ -102,6 +103,11 @@ import coil.request.ImageRequest
 import com.tgstorage.data.scanner.DeviceFile
 import com.tgstorage.ui.components.ErrorState
 import com.tgstorage.ui.components.LoadingState
+import com.tgstorage.util.StoragePermissionHelper
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -117,16 +123,9 @@ fun HomeScreen(
     var infoFile by remember { mutableStateOf<DeviceFile?>(null) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    // ── Permission handling ─────────────────────────────
-    val permissionsToRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        arrayOf(
-            Manifest.permission.READ_MEDIA_IMAGES,
-            Manifest.permission.READ_MEDIA_VIDEO,
-            Manifest.permission.READ_MEDIA_AUDIO,
-        )
-    } else {
-        arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
-    }
+    // ── Permission handling (using modern StoragePermissionHelper) ─────────────
+    val permissionsToRequest = StoragePermissionHelper.getMediaPermissions()
+    var showPermissionDeniedDialog by remember { mutableStateOf(false) }
 
     // Phase 9: Toast for "no app found" when opening a file
     var noAppToast by remember { mutableStateOf(false) }
@@ -134,15 +133,28 @@ fun HomeScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions(),
     ) { results ->
-        if (results.values.all { it }) viewModel.onPermissionGranted() else viewModel.onPermissionDenied()
+        if (results.values.any { it }) {
+            // At least partial access granted (Android 14+ partial photo access)
+            viewModel.onPermissionGranted()
+        } else {
+            // Check if permanently denied
+            val activity = context as? Activity
+            if (activity != null && StoragePermissionHelper.isPermanentlyDenied(activity, results)) {
+                showPermissionDeniedDialog = true
+            }
+            viewModel.onPermissionDenied()
+        }
     }
 
     LaunchedEffect(Unit) {
-        val allGranted = permissionsToRequest.all {
-            ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+        if (StoragePermissionHelper.hasMediaPermissions(context)) {
+            viewModel.onPermissionGranted()
+        } else if (StoragePermissionHelper.hasAnyMediaPermission(context)) {
+            // Partial access (good enough for now)
+            viewModel.onPermissionGranted()
+        } else {
+            permissionLauncher.launch(permissionsToRequest)
         }
-        if (allGranted) viewModel.onPermissionGranted()
-        else permissionLauncher.launch(permissionsToRequest)
     }
 
     LaunchedEffect(state.message) {
@@ -155,6 +167,30 @@ fun HomeScreen(
             snackbarHostState.showSnackbar("No app found to open this file")
             noAppToast = false
         }
+    }
+
+    // Permission permanently denied dialog
+    if (showPermissionDeniedDialog) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showPermissionDeniedDialog = false },
+            title = { Text("Permission Required") },
+            text = { 
+                Text("Storage permission was denied. Please enable it in Settings to browse and backup your files.") 
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showPermissionDeniedDialog = false
+                    (context as? Activity)?.let { StoragePermissionHelper.openAppSettings(it) }
+                }) {
+                    Text("Open Settings")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPermissionDeniedDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 
     Scaffold(
@@ -281,7 +317,12 @@ fun HomeScreen(
             }
 
             if (state.deviceFiles.isNotEmpty()) {
-                Text("${state.deviceFiles.size} files on device",
+                val countText = if (state.hasMoreFiles) {
+                    "${state.deviceFiles.size} of ${state.allFilesCount} files"
+                } else {
+                    "${state.deviceFiles.size} files on device"
+                }
+                Text(countText,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
@@ -311,11 +352,14 @@ fun HomeScreen(
                         selectedIds = state.selectedIds,
                         selectionMode = state.selectionMode,
                         uploadedNames = state.uploadedNames,
+                        hasMoreFiles = state.hasMoreFiles,
+                        isLoadingMore = state.isLoadingMore,
                         onTap = {
                             if (state.selectionMode) viewModel.toggleSelection(it.id)
                             else infoFile = it
                         },
                         onLongPress = { viewModel.toggleSelection(it.id) },
+                        onLoadMore = viewModel::loadMoreFiles,
                     )
 
                     else -> DeviceFileList(
@@ -323,11 +367,14 @@ fun HomeScreen(
                         selectedIds = state.selectedIds,
                         selectionMode = state.selectionMode,
                         uploadedNames = state.uploadedNames,
+                        hasMoreFiles = state.hasMoreFiles,
+                        isLoadingMore = state.isLoadingMore,
                         onTap = {
                             if (state.selectionMode) viewModel.toggleSelection(it.id)
                             else infoFile = it
                         },
                         onLongPress = { viewModel.toggleSelection(it.id) },
+                        onLoadMore = viewModel::loadMoreFiles,
                     )
                 }
             }
@@ -401,16 +448,33 @@ private fun StatusBanner(icon: ImageVector, text: String, color: Color, accessib
 @Composable
 private fun FileThumbnail(file: DeviceFile, modifier: Modifier = Modifier) {
     if (file.mimeType.startsWith("image/") || file.mimeType.startsWith("video/")) {
-        AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current)
-                .data(file.contentUri)
-                .crossfade(true)
-                .size(256)
-                .build(),
-            contentDescription = file.name,
-            modifier = modifier.clip(RoundedCornerShape(8.dp)),
-            contentScale = ContentScale.Crop,
-        )
+        val context = LocalContext.current
+        val iconColor = MaterialTheme.colorScheme.primary
+        Box(modifier = modifier.clip(RoundedCornerShape(8.dp))) {
+            AsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(file.contentUri)
+                    .crossfade(150) // Faster crossfade
+                    .size(128) // Smaller size for faster loading
+                    .memoryCacheKey("thumb_${file.id}") // Better cache key
+                    .build(),
+                contentDescription = file.name,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+                // Show placeholder while loading
+                placeholder = null,
+                error = null,
+            )
+            // Overlay icon for videos
+            if (file.mimeType.startsWith("video/")) {
+                Icon(
+                    Icons.Filled.PlayCircleOutline,
+                    contentDescription = "Video",
+                    modifier = Modifier.align(Alignment.Center).size(24.dp),
+                    tint = Color.White.copy(alpha = 0.9f),
+                )
+            }
+        }
     } else {
         Box(modifier = modifier, contentAlignment = Alignment.Center) {
             Icon(mimeIcon(file.mimeType), contentDescription = file.name, Modifier.size(40.dp),
@@ -428,23 +492,59 @@ private fun DeviceFileGrid(
     selectedIds: Set<Long>,
     selectionMode: Boolean,
     uploadedNames: Set<String>,
+    hasMoreFiles: Boolean = false,
+    isLoadingMore: Boolean = false,
     onTap: (DeviceFile) -> Unit,
     onLongPress: (DeviceFile) -> Unit,
+    onLoadMore: () -> Unit = {},
 ) {
+    // Cache grouped files to avoid regrouping on every recomposition
+    val grouped = remember(files) { groupFilesByDate(files) }
+
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = 150.dp),
+        columns = GridCells.Adaptive(minSize = 110.dp),
         contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        items(files, key = { it.id }) { file ->
-            val isSelected = file.id in selectedIds
-            val isUploaded = file.name in uploadedNames
-            DeviceFileGridItem(
-                file = file, isSelected = isSelected, selectionMode = selectionMode,
-                isUploaded = isUploaded,
-                onTap = { onTap(file) }, onLongPress = { onLongPress(file) },
-            )
+        grouped.forEach { (dateLabel, group) ->
+            // Full-width date header
+            item(span = { GridItemSpan(maxLineSpan) }, key = "header_$dateLabel") {
+                Text(
+                    text = dateLabel,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(top = 12.dp, bottom = 4.dp, start = 4.dp),
+                )
+            }
+            items(group, key = { it.id }) { file ->
+                val isSelected = file.id in selectedIds
+                val isUploaded = file.name in uploadedNames
+                DeviceFileGridItem(
+                    file = file, isSelected = isSelected, selectionMode = selectionMode,
+                    isUploaded = isUploaded,
+                    onTap = { onTap(file) }, onLongPress = { onLongPress(file) },
+                )
+            }
+        }
+
+        // Load more button at the bottom
+        if (hasMoreFiles) {
+            item(span = { GridItemSpan(maxLineSpan) }, key = "load_more") {
+                Box(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (isLoadingMore) {
+                        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                    } else {
+                        TextButton(onClick = onLoadMore) {
+                            Text("Load more files")
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -531,54 +631,89 @@ private fun DeviceFileList(
     selectedIds: Set<Long>,
     selectionMode: Boolean,
     uploadedNames: Set<String>,
+    hasMoreFiles: Boolean = false,
+    isLoadingMore: Boolean = false,
     onTap: (DeviceFile) -> Unit,
     onLongPress: (DeviceFile) -> Unit,
+    onLoadMore: () -> Unit = {},
 ) {
+    // Cache grouped files to avoid regrouping on every recomposition
+    val grouped = remember(files) { groupFilesByDate(files) }
+
     LazyColumn(contentPadding = PaddingValues(top = 4.dp, bottom = 16.dp)) {
-        items(files, key = { it.id }) { file ->
-            val isSelected = file.id in selectedIds
-            val isUploaded = file.name in uploadedNames
-            ListItem(
-                modifier = Modifier.combinedClickable(
-                    onClick = { onTap(file) },
-                    onLongClick = { onLongPress(file) },
-                    onClickLabel = "View file details",
-                    onLongClickLabel = "Select file",
-                ).semantics { selected = isSelected },
-                headlineContent = {
-                    Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                },
-                supportingContent = {
-                    Row(verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(formatFileSize(file.size), style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (isUploaded) {
-                            Icon(Icons.Filled.CloudDone, "Uploaded", Modifier.size(14.dp),
-                                tint = Color(0xFF4CAF50))
-                            Text("Uploaded", style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF4CAF50))
+        grouped.forEach { (dateLabel, group) ->
+            item(key = "list_header_$dateLabel") {
+                Text(
+                    text = dateLabel,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(top = 12.dp, bottom = 4.dp, start = 16.dp),
+                )
+            }
+            items(group, key = { it.id }) { file ->
+                val isSelected = file.id in selectedIds
+                val isUploaded = file.name in uploadedNames
+                ListItem(
+                    modifier = Modifier.combinedClickable(
+                        onClick = { onTap(file) },
+                        onLongClick = { onLongPress(file) },
+                        onClickLabel = "View file details",
+                        onLongClickLabel = "Select file",
+                    ).semantics { selected = isSelected },
+                    headlineContent = {
+                        Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    },
+                    supportingContent = {
+                        Row(verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(formatFileSize(file.size), style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (isUploaded) {
+                                Icon(Icons.Filled.CloudDone, "Uploaded", Modifier.size(14.dp),
+                                    tint = Color(0xFF4CAF50))
+                                Text("Uploaded", style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF4CAF50))
+                            }
+                        }
+                    },
+                    leadingContent = {
+                        FileThumbnail(file = file, modifier = Modifier.size(48.dp))
+                    },
+                    trailingContent = {
+                        if (selectionMode) {
+                            Icon(
+                                if (isSelected) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked,
+                                contentDescription = if (isSelected) "Selected" else "Not selected",
+                                tint = if (isSelected) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                            )
+                        }
+                    },
+                    colors = ListItemDefaults.colors(
+                        containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surface,
+                    ),
+                )
+            }
+        }
+
+        // Load more button at the bottom
+        if (hasMoreFiles) {
+            item(key = "list_load_more") {
+                Box(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (isLoadingMore) {
+                        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                    } else {
+                        TextButton(onClick = onLoadMore) {
+                            Text("Load more files")
                         }
                     }
-                },
-                leadingContent = {
-                    FileThumbnail(file = file, modifier = Modifier.size(48.dp))
-                },
-                trailingContent = {
-                    if (selectionMode) {
-                        Icon(
-                            if (isSelected) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked,
-                            contentDescription = if (isSelected) "Selected" else "Not selected",
-                            tint = if (isSelected) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                        )
-                    }
-                },
-                colors = ListItemDefaults.colors(
-                    containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer
-                    else MaterialTheme.colorScheme.surface,
-                ),
-            )
+                }
+            }
         }
     }
 }
@@ -680,4 +815,29 @@ private fun formatFileSize(bytes: Long): String = when {
     bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
     bytes < 1024 * 1024 * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
     else -> "%.2f GB".format(bytes / (1024.0 * 1024.0 * 1024.0))
+}
+
+/**
+ * Groups device files by date (Google Photos style).
+ * Uses dateModified epoch seconds to produce labels like "Today", "Yesterday", "Feb 10, 2026".
+ */
+private fun groupFilesByDate(files: List<DeviceFile>): List<Pair<String, List<DeviceFile>>> {
+    val cal = Calendar.getInstance()
+    val todayStart = Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+    val yesterdayStart = todayStart - 24 * 60 * 60 * 1000L
+    val dateFormat = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault())
+
+    return files
+        .sortedByDescending { it.dateModified }
+        .groupBy { file ->
+            val millis = file.dateModified * 1000L
+            when {
+                millis >= todayStart -> "Today"
+                millis >= yesterdayStart -> "Yesterday"
+                else -> dateFormat.format(Date(millis))
+            }
+        }
+        .toList()
 }

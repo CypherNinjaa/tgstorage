@@ -19,6 +19,9 @@ interface SyncStateDao {
     @Query("SELECT * FROM sync_state WHERE status = :status")
     suspend fun getByStatusSync(status: String): List<SyncStateEntity>
 
+    @Query("SELECT * FROM sync_state")
+    suspend fun getAllSyncStatesSync(): List<SyncStateEntity>
+
     @Query("SELECT COUNT(*) FROM sync_state WHERE status = :status")
     fun getCountByStatus(status: String): Flow<Int>
 

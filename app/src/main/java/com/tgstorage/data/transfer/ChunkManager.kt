@@ -53,8 +53,13 @@ class ChunkManager(
     private val metadataDao: MetadataDao,
 ) {
     companion object {
-        const val DEFAULT_CHUNK_SIZE = 20L * 1024 * 1024          // 20 MB
-        private const val SMALL_FILE_THRESHOLD = 49L * 1024 * 1024 // 49 MB — under Bot API 50 MB limit
+        // REDUCED TO 10MB: For safer uploads and downloads within Telegram limits.
+        // Telegram getFile API supports up to 20MB downloads, but keeping chunks at 10MB
+        // provides extra margin for network stability and API changes.
+        const val DEFAULT_CHUNK_SIZE = 10L * 1024 * 1024          // 10 MB per chunk
+        // Files under 10MB are uploaded as single document (fast path)
+        private const val SMALL_FILE_THRESHOLD = 10L * 1024 * 1024 // 10 MB
+        private const val TELEGRAM_DOWNLOAD_LIMIT = 20L * 1024 * 1024 // 20 MB - Telegram Bot API getFile limit
         private const val MAX_RETRIES = 3
         private const val INITIAL_BACKOFF_MS = 1000L
     }
@@ -305,6 +310,9 @@ class ChunkManager(
     /**
      * Downloads a file by fetching all chunks from Telegram,
      * verifying checksums, and reassembling into the output file.
+     * 
+     * Note: Telegram Bot API getFile only supports files up to 20MB.
+     * Files uploaded as a single document >20MB cannot be downloaded.
      */
     suspend fun downloadFile(
         token: String,
@@ -316,7 +324,20 @@ class ChunkManager(
         runCatching {
             val decrypt = shouldDecryptDownload(fileId)
             val chunks = chunkDao.getChunksForFileSync(fileId)
-            if (chunks.isEmpty()) throw IllegalStateException("No chunks found for file $fileId")
+            if (chunks.isEmpty()) throw IllegalStateException("No chunks found for file $fileId. The file may not have been uploaded through this app.")
+
+            // Check if any chunk exceeds Telegram's 20MB download limit
+            // This happens for files that were uploaded as single documents (20-50MB)
+            // before we fixed the chunking threshold
+            val oversizedChunks = chunks.filter { it.size > TELEGRAM_DOWNLOAD_LIMIT }
+            if (oversizedChunks.isNotEmpty()) {
+                val sizeInMB = oversizedChunks.first().size / (1024 * 1024)
+                throw IllegalStateException(
+                    "This file (${sizeInMB}MB) exceeds Telegram's 20MB download limit. " +
+                    "It was uploaded as a single document before the fix. " +
+                    "Please delete it from the cloud and re-upload to enable downloading."
+                )
+            }
 
             val totalBytes = chunks.sumOf { it.size }
             progressFlow.value = progressFlow.value.copy(

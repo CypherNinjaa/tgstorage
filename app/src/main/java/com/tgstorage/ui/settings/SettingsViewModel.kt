@@ -30,11 +30,14 @@ data class SettingsUiState(
     val chatId: String? = null,
     val isReverifying: Boolean = false,
     val cacheBytes: Long = 0L,
+    val pendingUploadBytes: Long = 0L,
     val isClearingCache: Boolean = false,
+    val isClearingPending: Boolean = false,
     val autoSyncEnabled: Boolean = true,
     val syncWifiOnly: Boolean = false,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val dynamicColor: Boolean = true,
+    val appLockEnabled: Boolean = false,
     val message: String? = null,
     val error: String? = null,
 )
@@ -53,7 +56,7 @@ class SettingsViewModel(
     init {
         observePreferences()
         refreshAccount()
-        refreshCacheSize()
+        refreshStorageSizes()
     }
 
     fun toggleTokenVisibility() {
@@ -109,6 +112,19 @@ class SettingsViewModel(
         }
     }
 
+    fun setAppLockEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            if (!enabled) {
+                // Disable app lock: clear passphrase data
+                metadataDao.deleteValue(MetadataKeys.PASSPHRASE_HASH)
+                metadataDao.deleteValue(MetadataKeys.PASSPHRASE_SALT)
+                metadataDao.deleteValue(MetadataKeys.PASSPHRASE_ENCRYPTED)
+            }
+            metadataDao.setValue(MetadataEntity(MetadataKeys.APP_LOCK_ENABLED, enabled.toString()))
+            _uiState.update { it.copy(appLockEnabled = enabled, message = if (enabled) "App lock enabled" else "App lock disabled") }
+        }
+    }
+
     fun clearCache() {
         viewModelScope.launch {
             _uiState.update { it.copy(isClearingCache = true, message = null, error = null) }
@@ -117,8 +133,42 @@ class SettingsViewModel(
             }.onFailure { e ->
                 _uiState.update { it.copy(isClearingCache = false, error = e.message ?: "Failed to clear cache") }
             }.onSuccess {
-                refreshCacheSize()
+                refreshStorageSizes()
                 _uiState.update { it.copy(isClearingCache = false, message = "Cache cleared") }
+            }
+        }
+    }
+    
+    fun clearPendingUploads() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isClearingPending = true, message = null, error = null) }
+            runCatching {
+                // Clean up any temp files from upload_temp cache
+                val uploadTempDir = File(app.cacheDir, "upload_temp")
+                deleteDir(uploadTempDir)
+                
+                // Also clean up legacy imported directory if it exists
+                val importedDir = File(app.filesDir, "imported")
+                deleteDir(importedDir)
+                
+                // Clear pending upload entries from database
+                val fileDao = app.database.fileDao()
+                val syncStateDao = app.database.syncStateDao()
+                
+                // Get all files with pending upload status and remove them
+                val pendingFiles = syncStateDao.getByStatusSync("pending_upload")
+                for (syncState in pendingFiles) {
+                    val file = fileDao.getFileById(syncState.fileId)
+                    if (file != null) {
+                        fileDao.deleteFile(file)
+                        syncStateDao.deleteByFileId(syncState.fileId)
+                    }
+                }
+            }.onFailure { e ->
+                _uiState.update { it.copy(isClearingPending = false, error = e.message ?: "Failed to clear pending uploads") }
+            }.onSuccess {
+                refreshStorageSizes()
+                _uiState.update { it.copy(isClearingPending = false, message = "Pending uploads cleared") }
             }
         }
     }
@@ -131,10 +181,22 @@ class SettingsViewModel(
         }
     }
 
-    private fun refreshCacheSize() {
+    private fun refreshStorageSizes() {
         viewModelScope.launch {
-            val size = dirSize(app.cacheDir)
-            _uiState.update { it.copy(cacheBytes = size) }
+            val cacheSize = dirSize(app.cacheDir)
+            
+            // Check upload_temp directory (active uploads)
+            val uploadTempDir = File(app.cacheDir, "upload_temp")
+            val uploadTempSize = dirSize(uploadTempDir)
+            
+            // Also check legacy imported directory
+            val importedDir = File(app.filesDir, "imported")
+            val legacySize = dirSize(importedDir)
+            
+            // Total pending storage = upload temp + legacy imported
+            val pendingSize = uploadTempSize + legacySize
+            
+            _uiState.update { it.copy(cacheBytes = cacheSize, pendingUploadBytes = pendingSize) }
         }
     }
 
@@ -145,7 +207,8 @@ class SettingsViewModel(
                 metadataDao.observeValue(MetadataKeys.DYNAMIC_COLOR),
                 syncRepository.observeAutoSync(),
                 metadataDao.observeValue(MetadataKeys.SYNC_WIFI_ONLY),
-            ) { themeModeRaw, dynamicRaw, autoSync, wifiOnlyRaw ->
+                metadataDao.observeValue(MetadataKeys.APP_LOCK_ENABLED),
+            ) { themeModeRaw, dynamicRaw, autoSync, wifiOnlyRaw, appLockRaw ->
                 val themeMode = when (themeModeRaw) {
                     ThemeMode.LIGHT.value -> ThemeMode.LIGHT
                     ThemeMode.DARK.value -> ThemeMode.DARK
@@ -153,17 +216,21 @@ class SettingsViewModel(
                 }
                 val dynamic = dynamicRaw?.toBoolean() ?: true
                 val wifiOnly = wifiOnlyRaw?.toBoolean() ?: false
+                val appLockEnabled = appLockRaw?.toBoolean() ?: false
                 SettingsUiState(
                     botToken = _uiState.value.botToken,
                     isTokenVisible = _uiState.value.isTokenVisible,
                     chatId = _uiState.value.chatId,
                     isReverifying = _uiState.value.isReverifying,
                     cacheBytes = _uiState.value.cacheBytes,
+                    pendingUploadBytes = _uiState.value.pendingUploadBytes,
                     isClearingCache = _uiState.value.isClearingCache,
+                    isClearingPending = _uiState.value.isClearingPending,
                     autoSyncEnabled = autoSync,
                     syncWifiOnly = wifiOnly,
                     themeMode = themeMode,
                     dynamicColor = dynamic,
+                    appLockEnabled = appLockEnabled,
                     isLoading = false,
                     message = _uiState.value.message,
                     error = _uiState.value.error,

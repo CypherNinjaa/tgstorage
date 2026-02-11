@@ -6,6 +6,8 @@ import com.tgstorage.common.CrashHandler
 import com.tgstorage.data.local.TgStorageDatabase
 import com.tgstorage.data.local.entity.BackupFrequency
 import com.tgstorage.data.local.entity.MetadataKeys
+import com.tgstorage.data.sync.AutoBackupWorker
+import com.tgstorage.data.sync.AutoRetryWorker
 import com.tgstorage.data.sync.BackupWorker
 import com.tgstorage.data.sync.CleanupWorker
 import com.tgstorage.data.sync.SyncWorker
@@ -74,6 +76,18 @@ class TgStorageApp : Application() {
                 ?: BackupFrequency.OFF
             if (freq != BackupFrequency.OFF) {
                 BackupWorker.schedule(this@TgStorageApp, freq)
+            }
+        }
+
+        // Schedule auto-retry worker to automatically retry failed uploads
+        AutoRetryWorker.schedule(this)
+
+        // Restore auto-upload worker if it was enabled
+        appScope.launch {
+            val autoUploadEnabled = database.metadataDao()
+                .getValue(MetadataKeys.AUTO_UPLOAD)?.toBoolean() ?: false
+            if (autoUploadEnabled) {
+                AutoBackupWorker.schedule(this@TgStorageApp)
             }
         }
     }

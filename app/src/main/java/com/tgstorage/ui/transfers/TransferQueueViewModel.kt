@@ -11,6 +11,7 @@ import com.tgstorage.data.local.dao.FileDao
 import com.tgstorage.data.local.dao.UploadedFileInfo
 import com.tgstorage.data.local.entity.FileEntity
 import com.tgstorage.data.repository.FileRepository
+import com.tgstorage.data.repository.SyncRepository
 import com.tgstorage.data.transfer.TransferManager
 import com.tgstorage.data.transfer.TransferProgress
 import com.tgstorage.data.transfer.TransferStatus
@@ -24,6 +25,11 @@ import kotlinx.coroutines.launch
 
 data class TransfersUiState(
     val transfers: List<TransferProgress> = emptyList(),
+    
+    // Pagination for transfers tab
+    val transfersDisplayed: List<TransferProgress> = emptyList(),
+    val transfersTotalCount: Int = 0,
+    val hasMoreTransfers: Boolean = false,
 
     // Paginated uploaded list — never holds ALL files
     val uploadedFiles: List<UploadedFileInfo> = emptyList(),
@@ -39,6 +45,12 @@ data class TransfersUiState(
     val transferFilter: TransferFileFilter = TransferFileFilter.ALL,
     val uploadedFilter: TransferFileFilter = TransferFileFilter.ALL,
     val uploadedViewMode: TransferViewMode = TransferViewMode.LIST,
+
+    // Sync stats (merged from SyncDashboard)
+    val syncPendingCount: Int = 0,
+    val syncUploadedCount: Int = 0,
+    val syncFailedCount: Int = 0,
+    val syncTotalCount: Int = 0,
 )
 
 enum class TransferFileFilter(val label: String, val mimePrefix: String?) {
@@ -54,10 +66,13 @@ enum class TransferViewMode { LIST, GRID }
 class TransferQueueViewModel(
     private val repository: FileRepository,
     private val fileDao: FileDao,
+    private val syncRepository: SyncRepository,
 ) : ViewModel() {
 
     companion object {
-        private const val PAGE_SIZE = 50
+        private const val INITIAL_PAGE_SIZE = 4
+        private const val LOAD_MORE_SIZE = 10
+        private const val TRANSFERS_PAGE_SIZE = 20 // Show 20 transfers at a time
 
         val Factory: ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
@@ -65,7 +80,8 @@ class TransferQueueViewModel(
                 val app = TgStorageApp.instance
                 val db = app.database
                 val repository = FileRepository(app, db.fileDao(), db.syncStateDao())
-                return TransferQueueViewModel(repository, db.fileDao()) as T
+                val syncRepository = SyncRepository(db.syncStateDao(), db.fileDao(), db.metadataDao())
+                return TransferQueueViewModel(repository, db.fileDao(), syncRepository) as T
             }
         }
     }
@@ -75,10 +91,12 @@ class TransferQueueViewModel(
 
     private var currentPage = 0
     private var uploadedQueryJob: Job? = null
+    private var transfersDisplayLimit = TRANSFERS_PAGE_SIZE
 
     init {
         observeTransfers()
         observeUploadedTabCount()
+        observeSyncStats()
         loadUploadedPage(reset = true)
     }
 
@@ -88,10 +106,44 @@ class TransferQueueViewModel(
 
     fun onTransferSearchChange(query: String) {
         _uiState.update { it.copy(transferSearchQuery = query) }
+        transfersDisplayLimit = TRANSFERS_PAGE_SIZE // Reset pagination on search
+        updateFilteredTransfers()
     }
 
     fun onTransferFilterChange(filter: TransferFileFilter) {
         _uiState.update { it.copy(transferFilter = filter) }
+        transfersDisplayLimit = TRANSFERS_PAGE_SIZE // Reset pagination on filter change
+        updateFilteredTransfers()
+    }
+
+    fun loadMoreTransfers() {
+        transfersDisplayLimit += TRANSFERS_PAGE_SIZE
+        updateFilteredTransfers()
+    }
+
+    private fun updateFilteredTransfers() {
+        val state = _uiState.value
+        val allTransfers = state.transfers
+        
+        // Apply search and filter
+        val filtered = allTransfers.filter { transfer ->
+            val matchesSearch = state.transferSearchQuery.isBlank() ||
+                transfer.fileName.contains(state.transferSearchQuery, ignoreCase = true)
+            val matchesFilter = state.transferFilter.mimePrefix == null ||
+                (transfer.mimeType?.startsWith(state.transferFilter.mimePrefix) ?: false)
+            matchesSearch && matchesFilter
+        }
+        
+        // Apply pagination - take only the first transfersDisplayLimit items
+        val displayed = filtered.take(transfersDisplayLimit)
+        
+        _uiState.update { 
+            it.copy(
+                transfersDisplayed = displayed,
+                transfersTotalCount = filtered.size,
+                hasMoreTransfers = displayed.size < filtered.size,
+            )
+        }
     }
 
     fun onUploadedSearchChange(query: String) {
@@ -131,8 +183,9 @@ class TransferQueueViewModel(
             val mimePrefix = state.uploadedFilter.mimePrefix ?: ""
 
             val totalCount = fileDao.getUploadedFilesCount(query, mimePrefix)
-            val offset = currentPage * PAGE_SIZE
-            val page = fileDao.getUploadedFilesPaged(query, mimePrefix, PAGE_SIZE, offset)
+            val pageSize = if (currentPage == 0) INITIAL_PAGE_SIZE else LOAD_MORE_SIZE
+            val offset = if (currentPage == 0) 0 else INITIAL_PAGE_SIZE + (currentPage - 1) * LOAD_MORE_SIZE
+            val page = fileDao.getUploadedFilesPaged(query, mimePrefix, pageSize, offset)
 
             currentPage++
 
@@ -154,6 +207,30 @@ class TransferQueueViewModel(
 
     fun cancelTransfer(fileId: Long, type: TransferType = TransferType.UPLOAD) {
         TransferManager.cancelTransfer(fileId, type)
+    }
+
+    fun pauseTransfer(fileId: Long, type: TransferType = TransferType.UPLOAD) {
+        TransferManager.pauseTransfer(fileId, type)
+    }
+
+    fun resumeTransfer(fileId: Long, type: TransferType = TransferType.UPLOAD) {
+        TransferManager.resumeTransfer(fileId, type)
+    }
+
+    fun retryTransfer(fileId: Long, type: TransferType = TransferType.UPLOAD) {
+        TransferManager.retryTransfer(fileId, type)
+    }
+
+    fun retryAllFailed() {
+        TransferManager.retryAllFailed()
+    }
+
+    fun pauseAll() {
+        TransferManager.pauseAll()
+    }
+
+    fun resumeAll() {
+        TransferManager.resumeAll()
     }
 
     fun clearFinished() {
@@ -215,14 +292,21 @@ class TransferQueueViewModel(
         } catch (_: Exception) { }
     }
 
+    private var lastCompletedCount = 0
+
     private fun observeTransfers() {
         viewModelScope.launch {
             TransferManager.transfers.collect { transfers ->
                 _uiState.update { it.copy(transfers = transfers) }
-                val justFinished = transfers.any {
+                updateFilteredTransfers()
+                // Only refresh uploaded list when a NEW upload completes (not on every emission)
+                val completedCount = transfers.count {
                     it.type == TransferType.UPLOAD && it.status == TransferStatus.COMPLETED
                 }
-                if (justFinished) refreshUploaded()
+                if (completedCount > lastCompletedCount) {
+                    lastCompletedCount = completedCount
+                    refreshUploaded()
+                }
             }
         }
     }
@@ -234,4 +318,28 @@ class TransferQueueViewModel(
             }
         }
     }
+
+    private fun observeSyncStats() {
+        viewModelScope.launch {
+            kotlinx.coroutines.flow.combine(
+                syncRepository.pendingCount,
+                syncRepository.uploadedCount,
+                syncRepository.failedCount,
+                syncRepository.totalCount,
+            ) { pending, uploaded, failed, total ->
+                SyncStats(pending, uploaded, failed, total)
+            }.collect { stats ->
+                _uiState.update {
+                    it.copy(
+                        syncPendingCount = stats.pending,
+                        syncUploadedCount = stats.uploaded,
+                        syncFailedCount = stats.failed,
+                        syncTotalCount = stats.total,
+                    )
+                }
+            }
+        }
+    }
+
+    private data class SyncStats(val pending: Int, val uploaded: Int, val failed: Int, val total: Int)
 }

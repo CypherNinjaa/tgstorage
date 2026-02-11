@@ -34,6 +34,8 @@ object MetadataKeys {
     const val BACKUP_FILE_ID = "backup_file_id"
     const val AUTO_BACKUP_FREQUENCY = "auto_backup_frequency" // off, daily, weekly, monthly
     const val FORGOT_PASSWORD_MSG_ID = "forgot_password_msg_id" // message_id sent for forgot password
+    const val APP_LOCK_ENABLED = "app_lock_enabled" // true/false — whether app lock is active
+    const val AUTO_RETRY_ENABLED = "auto_retry_enabled" // true/false — auto retry failed uploads
 }
 
 /** Backup frequency options. */
