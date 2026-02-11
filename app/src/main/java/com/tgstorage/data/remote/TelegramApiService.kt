@@ -109,6 +109,7 @@ class TelegramApiService {
         chatId: String,
         file: File,
         fileName: String = file.name,
+        caption: String? = null,
         onProgress: ((bytesWritten: Long, totalBytes: Long) -> Unit)? = null,
     ): Result<TelegramMessage> = withContext(Dispatchers.IO) {
         runCatching {
@@ -121,11 +122,16 @@ class TelegramApiService {
                 file.asRequestBody("application/octet-stream".toMediaType())
             }
 
-            val requestBody = MultipartBody.Builder()
+            val builder = MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
                 .addFormDataPart("chat_id", chatId)
                 .addFormDataPart("document", fileName, fileBody)
-                .build()
+
+            if (caption != null) {
+                builder.addFormDataPart("caption", caption)
+            }
+
+            val requestBody = builder.build()
 
             val request = Request.Builder()
                 .url("${BASE_URL}${token}/sendDocument")
@@ -171,6 +177,44 @@ class TelegramApiService {
             }
             response.body?.bytes() ?: throw TelegramApiException("Empty response body", null)
         }
+    }
+
+    /**
+     * GET /getChat — returns full chat info including pinned_message.
+     * Used to discover backup documents pinned in the channel.
+     */
+    suspend fun getChat(
+        token: String,
+        chatId: String,
+    ): Result<TelegramChatFullInfo> = executeGet(
+        url = "${BASE_URL}${token}/getChat?chat_id=${chatId}",
+        deserialize = { body ->
+            val resp = json.decodeFromString<TelegramResponse<TelegramChatFullInfo>>(body)
+            if (resp.ok && resp.result != null) resp.result
+            else throw TelegramApiException(resp.description ?: "getChat failed", resp.errorCode)
+        },
+    )
+
+    /**
+     * POST /pinChatMessage — pins a message in the channel.
+     * Used to pin backup documents so they can be discovered via getChat.
+     */
+    suspend fun pinChatMessage(
+        token: String,
+        chatId: String,
+        messageId: Long,
+        disableNotification: Boolean = true,
+    ): Result<Boolean> {
+        val url = "${BASE_URL}${token}/pinChatMessage?chat_id=${chatId}" +
+                "&message_id=${messageId}&disable_notification=${disableNotification}"
+        return executeGet(
+            url = url,
+            deserialize = { body ->
+                val resp = json.decodeFromString<TelegramResponse<Boolean>>(body)
+                if (resp.ok) true
+                else throw TelegramApiException(resp.description ?: "pinChatMessage failed", resp.errorCode)
+            },
+        )
     }
 
     // ─── Helpers ────────────────────────────────────────

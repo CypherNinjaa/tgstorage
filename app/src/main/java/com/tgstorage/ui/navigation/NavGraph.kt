@@ -100,7 +100,11 @@ fun TgStorageNavGraph(
         }
 
         composable(Screen.TransferQueue.route) {
-            TransferQueueScreen()
+            TransferQueueScreen(
+                onNavigateToFileDetail = { fileId ->
+                    navController.navigate(Screen.FileDetail.createRoute(fileId))
+                },
+            )
         }
 
         composable(Screen.SyncDashboard.route) {

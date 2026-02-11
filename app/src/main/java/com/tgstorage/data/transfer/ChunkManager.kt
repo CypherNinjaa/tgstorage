@@ -1,8 +1,13 @@
 package com.tgstorage.data.transfer
 
+import android.content.Context
+import com.tgstorage.common.security.CryptoManager
 import com.tgstorage.data.local.dao.ChunkDao
+import com.tgstorage.data.local.dao.FileDao
+import com.tgstorage.data.local.dao.MetadataDao
 import com.tgstorage.data.local.dao.SyncStateDao
 import com.tgstorage.data.local.entity.ChunkEntity
+import com.tgstorage.data.local.entity.MetadataKeys
 import com.tgstorage.data.local.entity.SyncStatus
 import com.tgstorage.data.local.entity.SyncStateEntity
 import com.tgstorage.data.remote.TelegramApiService
@@ -21,6 +26,7 @@ import java.security.MessageDigest
 data class TransferProgress(
     val fileId: Long,
     val fileName: String,
+    val mimeType: String,
     val type: TransferType,
     val currentChunk: Int = 0,
     val totalChunks: Int = 0,
@@ -39,9 +45,12 @@ enum class TransferStatus {
 // ─── ChunkManager ──────────────────────────────────────
 
 class ChunkManager(
+    private val context: Context,
     private val api: TelegramApiService,
     private val chunkDao: ChunkDao,
     private val syncStateDao: SyncStateDao,
+    private val fileDao: FileDao,
+    private val metadataDao: MetadataDao,
 ) {
     companion object {
         const val DEFAULT_CHUNK_SIZE = 20L * 1024 * 1024          // 20 MB
@@ -97,41 +106,55 @@ class ChunkManager(
         fileSize: Long,
         progressFlow: MutableStateFlow<TransferProgress>,
     ) {
+        val encrypt = shouldEncryptUpload()
+
         progressFlow.value = progressFlow.value.copy(
             totalChunks = 1,
             totalBytes = fileSize,
             status = TransferStatus.IN_PROGRESS,
         )
 
-        // Upload directly — no copy needed
-        val message = retryWithBackoff(MAX_RETRIES) {
-            api.sendDocument(
-                token = token, chatId = chatId, file = localFile, fileName = fileName,
-                onProgress = { bytesWritten, totalBytes ->
-                    progressFlow.value = progressFlow.value.copy(
-                        currentChunk = 0,
-                        bytesTransferred = bytesWritten,
-                        totalBytes = if (totalBytes > 0) totalBytes else fileSize,
-                    )
-                },
-            ).getOrThrow()
+        val checksum = computeSha256(localFile)
+        val uploadFile = if (encrypt) createEncryptedTempFile(localFile, fileId) else localFile
+        val uploadName = if (encrypt) "${fileName}.enc" else fileName
+        try {
+            val uploadTotal = uploadFile.length().coerceAtLeast(1L)
+            val message = retryWithBackoff(MAX_RETRIES) {
+                api.sendDocument(
+                    token = token, chatId = chatId, file = uploadFile, fileName = uploadName,
+                    onProgress = { bytesWritten, totalBytes ->
+                        val scaled = if (encrypt) {
+                            ((bytesWritten.toDouble() / uploadTotal) * fileSize).toLong()
+                        } else {
+                            bytesWritten
+                        }
+                        progressFlow.value = progressFlow.value.copy(
+                            currentChunk = 0,
+                            bytesTransferred = scaled,
+                            totalBytes = fileSize,
+                        )
+                    },
+                ).getOrThrow()
+            }
+
+            // Store single chunk record with Telegram file_id for downloads
+            val telegramFileId = message.document?.fileId
+            chunkDao.insertChunk(
+                ChunkEntity(
+                    fileId = fileId,
+                    chunkIndex = 0,
+                    telegramMessageId = message.messageId,
+                    telegramFileId = telegramFileId,
+                    checksum = checksum,
+                    size = fileSize,
+                )
+            )
+        } finally {
+            if (uploadFile != localFile) secureDelete(uploadFile)
         }
 
-        // Store single chunk record with Telegram file_id for downloads
-        val telegramFileId = message.document?.fileId
-        chunkDao.insertChunk(
-            ChunkEntity(
-                fileId = fileId,
-                chunkIndex = 0,
-                telegramMessageId = message.messageId,
-                telegramFileId = telegramFileId,
-                checksum = computeSha256(localFile),
-                size = fileSize,
-            )
-        )
-
         // Mark as uploaded
-        markUploaded(fileId)
+        markUploaded(fileId, encrypt)
 
         progressFlow.value = progressFlow.value.copy(
             currentChunk = 1,
@@ -150,6 +173,7 @@ class ChunkManager(
         fileSize: Long,
         progressFlow: MutableStateFlow<TransferProgress>,
     ) {
+        val encrypt = shouldEncryptUpload()
         val chunkSize = DEFAULT_CHUNK_SIZE
         val totalChunks = ((fileSize + chunkSize - 1) / chunkSize).toInt()
 
@@ -192,15 +216,33 @@ class ChunkManager(
 
                 val chunkFile = File(tempDir, "chunk_$chunkIndex")
                 splitChunk(localFile, chunkFile, offset, thisChunkSize)
-                val chunkChecksum = computeSha256(chunkFile)
+                val plainBytes = chunkFile.readBytes()
+                val chunkChecksum = computeSha256(plainBytes)
+                val uploadFile = if (encrypt) {
+                    val encryptedBytes = CryptoManager.encrypt(plainBytes)
+                    val encryptedFile = File(tempDir, "chunk_$chunkIndex.enc")
+                    encryptedFile.writeBytes(encryptedBytes)
+                    secureDelete(chunkFile)
+                    encryptedFile
+                } else {
+                    chunkFile
+                }
 
+                val uploadTotal = uploadFile.length().coerceAtLeast(1L)
+                val chunkName = if (encrypt) "${fileName}.part${chunkIndex + 1}of$totalChunks.enc"
+                    else "${fileName}.part${chunkIndex + 1}of$totalChunks"
                 val message = retryWithBackoff(MAX_RETRIES) {
                     api.sendDocument(
-                        token = token, chatId = chatId, file = chunkFile,
-                        fileName = "${fileName}.part${chunkIndex + 1}of$totalChunks",
+                        token = token, chatId = chatId, file = uploadFile,
+                        fileName = chunkName,
                         onProgress = { bytesWritten, _ ->
+                            val scaled = if (encrypt) {
+                                ((bytesWritten.toDouble() / uploadTotal) * thisChunkSize).toLong()
+                            } else {
+                                bytesWritten
+                            }
                             progressFlow.value = progressFlow.value.copy(
-                                bytesTransferred = bytesUploaded + bytesWritten,
+                                bytesTransferred = bytesUploaded + scaled,
                             )
                         },
                     ).getOrThrow()
@@ -217,7 +259,8 @@ class ChunkManager(
                     )
                 )
 
-                chunkFile.delete()
+                if (uploadFile != chunkFile) secureDelete(uploadFile)
+                if (chunkFile.exists()) chunkFile.delete()
                 bytesUploaded += thisChunkSize
                 progressFlow.value = progressFlow.value.copy(
                     currentChunk = chunkIndex + 1,
@@ -229,11 +272,15 @@ class ChunkManager(
             tempDir.deleteRecursively()
         }
 
-        markUploaded(fileId)
+        markUploaded(fileId, encrypt)
         progressFlow.value = progressFlow.value.copy(status = TransferStatus.COMPLETED)
     }
 
-    private suspend fun markUploaded(fileId: Long) {
+    private suspend fun markUploaded(fileId: Long, encrypted: Boolean) {
+        val file = fileDao.getFileById(fileId)
+        if (file != null && encrypted && !file.encryptionFlag) {
+            fileDao.updateFile(file.copy(encryptionFlag = true))
+        }
         val existing = syncStateDao.getSyncState(fileId)
         syncStateDao.insertOrUpdate(
             (existing ?: SyncStateEntity(fileId = fileId)).copy(
@@ -241,6 +288,18 @@ class ChunkManager(
                 lastAttempt = System.currentTimeMillis(),
             )
         )
+
+        // Generate thumbnail before deleting local file, then clean up
+        val entity = file ?: fileDao.getFileById(fileId)
+        entity?.localUri?.let { localPath ->
+            ThumbnailManager.generateThumbnail(
+                context, fileDao, fileId, localPath, entity.mimeType,
+            )
+            // Delete the full-size local copy to free storage
+            val localFile = File(localPath)
+            if (localFile.exists()) localFile.delete()
+            fileDao.clearLocalUri(fileId)
+        }
     }
 
     /**
@@ -255,6 +314,7 @@ class ChunkManager(
         progressFlow: MutableStateFlow<TransferProgress>,
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
+            val decrypt = shouldDecryptDownload(fileId)
             val chunks = chunkDao.getChunksForFileSync(fileId)
             if (chunks.isEmpty()) throw IllegalStateException("No chunks found for file $fileId")
 
@@ -287,17 +347,18 @@ class ChunkManager(
                     val chunkBytes = retryWithBackoff(MAX_RETRIES) {
                         api.downloadFile(token, filePath).getOrThrow()
                     }
+                    val plainBytes = if (decrypt) CryptoManager.decrypt(chunkBytes) else chunkBytes
 
                     // Verify checksum
                     if (chunk.checksum.isNotBlank()) {
-                        val downloadedChecksum = computeSha256(chunkBytes)
+                        val downloadedChecksum = computeSha256(plainBytes)
                         if (downloadedChecksum != chunk.checksum) {
                             throw SecurityException("Checksum mismatch for chunk ${chunk.chunkIndex}")
                         }
                     }
 
-                    output.write(chunkBytes)
-                    bytesDownloaded += chunkBytes.size
+                    output.write(plainBytes)
+                    bytesDownloaded += plainBytes.size
 
                     progressFlow.value = progressFlow.value.copy(
                         currentChunk = index + 1,
@@ -351,6 +412,40 @@ class ChunkManager(
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update(bytes)
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private suspend fun shouldEncryptUpload(): Boolean {
+        return metadataDao.getValue(MetadataKeys.ENCRYPTION_ENABLED)?.toBoolean() ?: true
+    }
+
+    private suspend fun shouldDecryptDownload(fileId: Long): Boolean {
+        val file = fileDao.getFileById(fileId)
+        return file?.encryptionFlag == true
+    }
+
+    private fun createEncryptedTempFile(source: File, fileId: Long): File {
+        val encryptedBytes = CryptoManager.encrypt(source.readBytes())
+        val tempFile = File(source.parentFile ?: source.absoluteFile.parentFile, "enc_${fileId}_${System.currentTimeMillis()}")
+        tempFile.writeBytes(encryptedBytes)
+        return tempFile
+    }
+
+    private fun secureDelete(file: File) {
+        runCatching {
+            if (!file.exists()) return
+            RandomAccessFile(file, "rw").use { raf ->
+                val size = raf.length()
+                raf.seek(0)
+                val buffer = ByteArray(8192)
+                var remaining = size
+                while (remaining > 0) {
+                    val toWrite = minOf(buffer.size.toLong(), remaining).toInt()
+                    raf.write(buffer, 0, toWrite)
+                    remaining -= toWrite
+                }
+            }
+        }
+        file.delete()
     }
 
     private suspend fun <T> retryWithBackoff(maxRetries: Int, block: suspend () -> T): T {

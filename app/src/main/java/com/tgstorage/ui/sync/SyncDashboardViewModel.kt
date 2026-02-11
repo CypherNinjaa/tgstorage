@@ -7,6 +7,7 @@ import com.tgstorage.TgStorageApp
 import com.tgstorage.common.NetworkMonitor
 import com.tgstorage.data.local.entity.SyncStateEntity
 import com.tgstorage.data.local.entity.SyncStatus
+import com.tgstorage.data.local.entity.MetadataKeys
 import com.tgstorage.data.repository.SyncRepository
 import com.tgstorage.data.sync.SyncWorker
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -99,7 +100,9 @@ class SyncDashboardViewModel(application: Application) : AndroidViewModel(applic
         viewModelScope.launch {
             syncRepository.setAutoSync(enabled)
             if (enabled) {
-                SyncWorker.schedule(getApplication())
+                val wifiOnly = db.metadataDao()
+                    .getValue(MetadataKeys.SYNC_WIFI_ONLY)?.toBoolean() ?: false
+                SyncWorker.schedule(getApplication(), wifiOnly)
             } else {
                 SyncWorker.cancel(getApplication())
             }

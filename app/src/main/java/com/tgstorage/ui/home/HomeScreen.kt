@@ -3,6 +3,7 @@ package com.tgstorage.ui.home
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -59,6 +60,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SearchBar
 import androidx.compose.material3.SearchBarDefaults
@@ -66,7 +68,9 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -106,6 +110,8 @@ fun HomeScreen(
     val context = LocalContext.current
     var searchActive by rememberSaveable { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
+    var infoFile by remember { mutableStateOf<DeviceFile?>(null) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     // ── Permission handling ─────────────────────────────
     val permissionsToRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -286,7 +292,10 @@ fun HomeScreen(
                         selectedIds = state.selectedIds,
                         selectionMode = state.selectionMode,
                         uploadedNames = state.uploadedNames,
-                        onTap = { if (state.selectionMode) viewModel.toggleSelection(it.id) },
+                        onTap = {
+                            if (state.selectionMode) viewModel.toggleSelection(it.id)
+                            else infoFile = it
+                        },
                         onLongPress = { viewModel.toggleSelection(it.id) },
                     )
 
@@ -295,11 +304,27 @@ fun HomeScreen(
                         selectedIds = state.selectedIds,
                         selectionMode = state.selectionMode,
                         uploadedNames = state.uploadedNames,
-                        onTap = { if (state.selectionMode) viewModel.toggleSelection(it.id) },
+                        onTap = {
+                            if (state.selectionMode) viewModel.toggleSelection(it.id)
+                            else infoFile = it
+                        },
                         onLongPress = { viewModel.toggleSelection(it.id) },
                     )
                 }
             }
+        }
+    }
+
+    if (infoFile != null) {
+        ModalBottomSheet(
+            onDismissRequest = { infoFile = null },
+            sheetState = sheetState,
+        ) {
+            DeviceFileInfoSheet(
+                file = infoFile!!,
+                onOpen = { openDeviceFile(context, infoFile!!); infoFile = null },
+                onClose = { infoFile = null },
+            )
         }
     }
 }
@@ -526,6 +551,87 @@ private fun DeviceFileList(
                 ),
             )
         }
+    }
+}
+
+@Composable
+private fun DeviceFileInfoSheet(
+    file: DeviceFile,
+    onOpen: () -> Unit,
+    onClose: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                mimeIcon(file.mimeType),
+                null,
+                modifier = Modifier.size(28.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(file.name, style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(formatFileSize(file.size), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        InfoRow("MIME", file.mimeType)
+        InfoRow(
+            "Modified",
+            DateUtils.getRelativeTimeSpanString(
+                file.dateModified * 1000L,
+                System.currentTimeMillis(),
+                DateUtils.MINUTE_IN_MILLIS,
+            ).toString(),
+        )
+
+        Spacer(Modifier.height(16.dp))
+
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button(
+                onClick = onOpen,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("Open")
+            }
+            TextButton(
+                onClick = onClose,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("Close")
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun InfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium)
+    }
+}
+
+private fun openDeviceFile(context: android.content.Context, file: DeviceFile) {
+    try {
+        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+            setDataAndType(file.contentUri, file.mimeType)
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val chooser = android.content.Intent.createChooser(intent, "Open with")
+        context.startActivity(chooser)
+    } catch (_: Exception) {
+        // Ignore if no app can handle the file
     }
 }
 

@@ -22,10 +22,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.outlined.Backup
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.SmartToy
@@ -53,6 +56,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -70,10 +74,18 @@ fun OnboardingScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
 
-    // Navigate when complete
+    // Navigate when complete (skip restore or fresh start)
     LaunchedEffect(state.isComplete) {
         if (state.isComplete) onOnboardingComplete()
+    }
+
+    // Restart app after successful restore
+    LaunchedEffect(state.restoreComplete) {
+        if (state.restoreComplete) {
+            viewModel.restartApp(context)
+        }
     }
 
     // Show errors as snackbar
@@ -94,9 +106,9 @@ fun OnboardingScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            // Step progress
+            // Step progress (4 steps now)
             LinearProgressIndicator(
-                progress = { (state.currentStep + 1) / 3f },
+                progress = { (state.currentStep + 1) / 4f },
                 modifier = Modifier.fillMaxWidth(),
             )
 
@@ -136,6 +148,14 @@ fun OnboardingScreen(
                         onChannelIdChange = viewModel::updateChannelId,
                         onVerify = viewModel::verifyChannel,
                         onBack = viewModel::previousStep,
+                    )
+                    3 -> BackupRestoreStep(
+                        isSearching = state.isSearchingBackup,
+                        backupInfo = state.backupInfo,
+                        isRestoring = state.isRestoring,
+                        error = state.error,
+                        onRestore = viewModel::restoreBackup,
+                        onSkip = viewModel::skipRestore,
                     )
                 }
             }
@@ -506,6 +526,238 @@ private fun VerifyChannelStep(
                     )
                 } else {
                     Text("Verify Channel")
+                }
+            }
+        }
+    }
+}
+
+// ─── Step 4: Backup Restore ────────────────────────────
+
+@Composable
+private fun BackupRestoreStep(
+    isSearching: Boolean,
+    backupInfo: com.tgstorage.data.sync.BackupInfo?,
+    isRestoring: Boolean,
+    error: String?,
+    onRestore: () -> Unit,
+    onSkip: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Icon(
+            imageVector = Icons.Outlined.Backup,
+            contentDescription = null,
+            modifier = Modifier.size(64.dp),
+            tint = MaterialTheme.colorScheme.primary,
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Text(
+            text = "Restore Backup",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = if (isSearching) "Searching for existing backup..."
+            else if (backupInfo != null) "A backup was found in your channel"
+            else "No backup found in this channel",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+
+        Spacer(modifier = Modifier.height(32.dp))
+
+        if (isSearching) {
+            CircularProgressIndicator(modifier = Modifier.size(48.dp))
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "Checking pinned messages...",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else if (backupInfo != null) {
+            // Show backup info card
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Filled.CloudDownload,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "Backup Available",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    backupInfo.fileName?.let {
+                        Text(
+                            text = "File: $it",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                    backupInfo.fileSize?.let { size ->
+                        val sizeText = when {
+                            size < 1024 -> "$size B"
+                            size < 1024 * 1024 -> "${size / 1024} KB"
+                            else -> String.format("%.1f MB", size / (1024.0 * 1024.0))
+                        }
+                        Text(
+                            text = "Size: $sizeText",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "What gets restored:",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "\u2022 All file metadata and upload history\n" +
+                                "\u2022 Settings and preferences\n" +
+                                "\u2022 Sync state and queue\n" +
+                                "\u2022 The app will restart after restore",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            if (isRestoring) {
+                Spacer(modifier = Modifier.height(24.dp))
+                CircularProgressIndicator(modifier = Modifier.size(48.dp))
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Restoring backup...",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+
+            if (error != null) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = error,
+                        modifier = Modifier.padding(16.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                }
+            }
+        } else {
+            // No backup found
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.CloudQueue,
+                        contentDescription = null,
+                        modifier = Modifier.size(48.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "No previous backup was found",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "You can create backups later from Settings",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+
+        if (!isSearching) {
+            if (backupInfo != null) {
+                Button(
+                    onClick = onRestore,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isRestoring,
+                ) {
+                    if (isRestoring) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                    } else {
+                        Icon(Icons.Filled.Restore, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Restore Backup")
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = onSkip,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isRestoring,
+                ) {
+                    Text("Start Fresh")
+                }
+            } else {
+                Button(
+                    onClick = onSkip,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Continue")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null)
                 }
             }
         }

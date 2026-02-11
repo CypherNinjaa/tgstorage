@@ -29,16 +29,39 @@ class TgStorageApp : Application() {
             TgStorageDatabase::class.java,
             TgStorageDatabase.DATABASE_NAME,
         )
-            .addMigrations(TgStorageDatabase.MIGRATION_1_2, TgStorageDatabase.MIGRATION_2_3)
+            .addMigrations(
+                TgStorageDatabase.MIGRATION_1_2,
+                TgStorageDatabase.MIGRATION_2_3,
+                TgStorageDatabase.MIGRATION_3_4,
+            )
             .build()
 
         // Create notification channels
         SyncWorker.createNotificationChannel(this)
         BackupWorker.createNotificationChannel(this)
 
+        // Ensure encryption is enabled by default in DB
+        appScope.launch {
+            val dao = database.metadataDao()
+            if (dao.getValue(MetadataKeys.ENCRYPTION_ENABLED) == null) {
+                dao.setValue(
+                    com.tgstorage.data.local.entity.MetadataEntity(
+                        MetadataKeys.ENCRYPTION_ENABLED, "true"
+                    )
+                )
+            }
+        }
+
         // Schedule periodic background workers
-        SyncWorker.schedule(this)
         CleanupWorker.schedule(this)
+        appScope.launch {
+            val autoSync = database.metadataDao()
+                .getValue(MetadataKeys.AUTO_SYNC_ENABLED)?.toBoolean() ?: true
+            val wifiOnly = database.metadataDao()
+                .getValue(MetadataKeys.SYNC_WIFI_ONLY)?.toBoolean() ?: false
+            if (autoSync) SyncWorker.schedule(this@TgStorageApp, wifiOnly)
+            else SyncWorker.cancel(this@TgStorageApp)
+        }
 
         // Schedule auto-backup based on saved frequency
         appScope.launch {

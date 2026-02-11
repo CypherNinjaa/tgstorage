@@ -49,9 +49,11 @@ class SyncWorker(
         private const val NOTIFICATION_ID = 1001
 
         /** Schedule periodic sync every 15 minutes — runs even when app is closed. */
-        fun schedule(context: Context) {
+        fun schedule(context: Context, wifiOnly: Boolean = false) {
             val constraints = Constraints.Builder()
-                .setRequiredNetworkType(NetworkType.CONNECTED)
+                .setRequiredNetworkType(
+                    if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED
+                )
                 .build()
 
             val request = PeriodicWorkRequestBuilder<SyncWorker>(
@@ -68,7 +70,7 @@ class SyncWorker(
                 ExistingPeriodicWorkPolicy.UPDATE,
                 request,
             )
-            Log.d(TAG, "Periodic sync scheduled (every 15 min, requires network)")
+            Log.d(TAG, "Periodic sync scheduled (every 15 min, wifiOnly=$wifiOnly)")
         }
 
         /** Cancel the periodic sync. */
@@ -153,9 +155,12 @@ class SyncWorker(
         Log.d(TAG, "Processing ${pendingFiles.size} pending uploads")
 
         val chunkManager = ChunkManager(
+            context = applicationContext,
             api = TelegramApiService(),
             chunkDao = db.chunkDao(),
             syncStateDao = db.syncStateDao(),
+            fileDao = db.fileDao(),
+            metadataDao = db.metadataDao(),
         )
 
         var successCount = 0
@@ -200,6 +205,7 @@ class SyncWorker(
                 TransferProgress(
                     fileId = fileEntity.id,
                     fileName = fileEntity.name,
+                    mimeType = fileEntity.mimeType,
                     type = TransferType.UPLOAD,
                     totalBytes = fileEntity.size,
                     status = TransferStatus.PENDING,

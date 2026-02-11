@@ -16,6 +16,7 @@ data class UploadedFileInfo(
     val size: Long,
     val mimeType: String,
     val localUri: String?,
+    val thumbnailUri: String?,
     val updatedAt: Long,
     val uploadedAt: Long?,
     val telegramFileId: String?,
@@ -59,6 +60,7 @@ interface FileDao {
 
     @Query("""
         SELECT f.id, f.name, f.size, f.mime_type AS mimeType, f.local_uri AS localUri,
+               f.thumbnail_uri AS thumbnailUri,
                f.updated_at AS updatedAt, s.last_attempt AS uploadedAt,
                c.telegram_file_id AS telegramFileId
         FROM files f
@@ -68,4 +70,49 @@ interface FileDao {
         ORDER BY s.last_attempt DESC
     """)
     fun getUploadedFilesDetailed(): Flow<List<UploadedFileInfo>>
+
+    /** Paginated uploaded files with search + filter — all filtering in SQL */
+    @Query("""
+        SELECT f.id, f.name, f.size, f.mime_type AS mimeType, f.local_uri AS localUri,
+               f.thumbnail_uri AS thumbnailUri,
+               f.updated_at AS updatedAt, s.last_attempt AS uploadedAt,
+               c.telegram_file_id AS telegramFileId
+        FROM files f
+        INNER JOIN sync_state s ON f.id = s.file_id
+        LEFT JOIN chunks c ON f.id = c.file_id AND c.chunk_index = 0
+        WHERE s.status = 'uploaded'
+          AND (:query = '' OR f.name LIKE '%' || :query || '%')
+          AND (:mimePrefix = '' OR f.mime_type LIKE :mimePrefix || '%')
+        ORDER BY s.last_attempt DESC
+        LIMIT :limit OFFSET :offset
+    """)
+    suspend fun getUploadedFilesPaged(
+        query: String,
+        mimePrefix: String,
+        limit: Int,
+        offset: Int,
+    ): List<UploadedFileInfo>
+
+    /** Count of uploaded files matching search + filter */
+    @Query("""
+        SELECT COUNT(*)
+        FROM files f
+        INNER JOIN sync_state s ON f.id = s.file_id
+        WHERE s.status = 'uploaded'
+          AND (:query = '' OR f.name LIKE '%' || :query || '%')
+          AND (:mimePrefix = '' OR f.mime_type LIKE :mimePrefix || '%')
+    """)
+    suspend fun getUploadedFilesCount(query: String, mimePrefix: String): Int
+
+    /** Total uploaded count (for tab header) — reactive Flow */
+    @Query("SELECT COUNT(*) FROM sync_state WHERE status = 'uploaded'")
+    fun getUploadedTotalCount(): Flow<Int>
+
+    /** Clear the local_uri after upload to free storage */
+    @Query("UPDATE files SET local_uri = NULL WHERE id = :fileId")
+    suspend fun clearLocalUri(fileId: Long)
+
+    /** Set thumbnail URI */
+    @Query("UPDATE files SET thumbnail_uri = :uri WHERE id = :fileId")
+    suspend fun setThumbnailUri(fileId: Long, uri: String)
 }

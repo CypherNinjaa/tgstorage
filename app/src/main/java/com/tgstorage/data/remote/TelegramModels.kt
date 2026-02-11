@@ -56,3 +56,16 @@ data class TelegramFile(
     @SerialName("file_size") val fileSize: Long? = null,
     @SerialName("file_path") val filePath: String? = null,
 )
+
+/**
+ * Full chat info returned by getChat, includes pinned_message field.
+ * See: https://core.telegram.org/bots/api#chatfullinfo
+ */
+@Serializable
+data class TelegramChatFullInfo(
+    val id: Long,
+    val type: String,
+    val title: String? = null,
+    val username: String? = null,
+    @SerialName("pinned_message") val pinnedMessage: TelegramMessage? = null,
+)

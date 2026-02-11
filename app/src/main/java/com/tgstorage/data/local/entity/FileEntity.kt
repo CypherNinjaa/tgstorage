@@ -27,6 +27,9 @@ data class FileEntity(
     @ColumnInfo(name = "local_uri")
     val localUri: String? = null,
 
+    @ColumnInfo(name = "thumbnail_uri")
+    val thumbnailUri: String? = null,
+
     @ColumnInfo(name = "created_at")
     val createdAt: Long = System.currentTimeMillis(),
 

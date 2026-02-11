@@ -27,11 +27,15 @@ object TransferManager {
     val transfers: StateFlow<List<TransferProgress>> = _transfers.asStateFlow()
 
     private fun getChunkManager(): ChunkManager {
-        val db = TgStorageApp.instance.database
+        val app = TgStorageApp.instance
+        val db = app.database
         return ChunkManager(
+            context = app,
             api = com.tgstorage.data.remote.TelegramApiService(),
             chunkDao = db.chunkDao(),
             syncStateDao = db.syncStateDao(),
+            fileDao = db.fileDao(),
+            metadataDao = db.metadataDao(),
         )
     }
 
@@ -52,6 +56,7 @@ object TransferManager {
             TransferProgress(
                 fileId = file.id,
                 fileName = file.name,
+                mimeType = file.mimeType,
                 type = TransferType.UPLOAD,
                 totalBytes = file.size,
                 status = TransferStatus.PENDING,
@@ -119,6 +124,7 @@ object TransferManager {
             TransferProgress(
                 fileId = file.id,
                 fileName = file.name,
+                mimeType = file.mimeType,
                 type = TransferType.DOWNLOAD,
                 totalBytes = file.size,
                 status = TransferStatus.PENDING,

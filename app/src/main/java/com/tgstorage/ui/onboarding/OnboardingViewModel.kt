@@ -1,5 +1,7 @@
 package com.tgstorage.ui.onboarding
 
+import android.content.Context
+import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -7,6 +9,8 @@ import com.tgstorage.TgStorageApp
 import com.tgstorage.data.remote.TelegramApiService
 import com.tgstorage.data.remote.TelegramUser
 import com.tgstorage.data.repository.TelegramRepository
+import com.tgstorage.data.sync.BackupInfo
+import com.tgstorage.data.sync.BackupManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -14,7 +18,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class OnboardingUiState(
-    val currentStep: Int = 0,  // 0=HowItWorks, 1=BotToken, 2=VerifyChannel
+    val currentStep: Int = 0,  // 0=HowItWorks, 1=BotToken, 2=VerifyChannel, 3=BackupRestore
     val botToken: String = "",
     val channelId: String = "",
     val isTokenVisible: Boolean = false,
@@ -24,17 +28,23 @@ data class OnboardingUiState(
     val isTokenValid: Boolean = false,
     val isChannelVerified: Boolean = false,
     val isComplete: Boolean = false,
+    // Backup restore
+    val backupInfo: BackupInfo? = null,
+    val isSearchingBackup: Boolean = false,
+    val isRestoring: Boolean = false,
+    val restoreComplete: Boolean = false,
 )
 
 class OnboardingViewModel(
     private val repository: TelegramRepository,
+    private val backupManager: BackupManager,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(OnboardingUiState())
     val uiState: StateFlow<OnboardingUiState> = _uiState.asStateFlow()
 
     fun nextStep() {
-        _uiState.update { it.copy(currentStep = (it.currentStep + 1).coerceAtMost(2), error = null) }
+        _uiState.update { it.copy(currentStep = (it.currentStep + 1).coerceAtMost(3), error = null) }
     }
 
     fun previousStep() {
@@ -105,16 +115,18 @@ class OnboardingViewModel(
                 .onSuccess { msg ->
                     val resolvedChatId = msg.chat.id.toString()
                     repository.saveChatId(resolvedChatId)
-                    repository.setOnboardingCompleted(true)
                     _uiState.update {
                         it.copy(
                             isLoading = false,
                             isChannelVerified = true,
                             channelId = resolvedChatId,
                             error = null,
-                            isComplete = true,
+                            currentStep = 3,
+                            isSearchingBackup = true,
                         )
                     }
+                    // Automatically search for backup in the channel
+                    searchForBackup()
                 }
                 .onFailure { e ->
                     _uiState.update {
@@ -128,16 +140,88 @@ class OnboardingViewModel(
         }
     }
 
+    private fun searchForBackup() {
+        val token = _uiState.value.botToken.trim()
+        val chatId = _uiState.value.channelId.trim()
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSearchingBackup = true, error = null) }
+            val backupInfo = backupManager.findBackupInChannel(token, chatId)
+            _uiState.update {
+                it.copy(
+                    isSearchingBackup = false,
+                    backupInfo = backupInfo,
+                )
+            }
+        }
+    }
+
+    fun restoreBackup() {
+        val token = _uiState.value.botToken.trim()
+        val chatId = _uiState.value.channelId.trim()
+        val fileId = _uiState.value.backupInfo?.fileId ?: return
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isRestoring = true, error = null) }
+            backupManager.restoreFromTelegram(
+                token = token,
+                chatId = chatId,
+                fileId = fileId,
+            )
+                .onSuccess {
+                    _uiState.update {
+                        it.copy(
+                            isRestoring = false,
+                            restoreComplete = true,
+                        )
+                    }
+                }
+                .onFailure { e ->
+                    _uiState.update {
+                        it.copy(
+                            isRestoring = false,
+                            error = "Restore failed: ${e.message}",
+                        )
+                    }
+                }
+        }
+    }
+
+    fun skipRestore() {
+        viewModelScope.launch {
+            repository.setOnboardingCompleted(true)
+            _uiState.update { it.copy(isComplete = true) }
+        }
+    }
+
+    /**
+     * Restart the app after a successful database restore.
+     */
+    fun restartApp(context: Context) {
+        val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+        if (intent != null) {
+            intent.addFlags(
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_CLEAR_TASK or
+                        Intent.FLAG_ACTIVITY_NEW_TASK
+            )
+            context.startActivity(intent)
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }
+    }
+
     companion object {
         val Factory: ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                val db = TgStorageApp.instance.database
+                val app = TgStorageApp.instance
+                val db = app.database
                 val repo = TelegramRepository(
                     api = TelegramApiService(),
                     metadataDao = db.metadataDao(),
                 )
-                return OnboardingViewModel(repo) as T
+                val backupManager = BackupManager(app)
+                return OnboardingViewModel(repo, backupManager) as T
             }
         }
     }

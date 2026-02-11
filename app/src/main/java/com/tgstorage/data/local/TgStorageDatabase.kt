@@ -20,7 +20,7 @@ import com.tgstorage.data.local.entity.SyncStateEntity
         SyncStateEntity::class,
         MetadataEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class TgStorageDatabase : RoomDatabase() {
@@ -42,6 +42,12 @@ abstract class TgStorageDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE sync_state ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
                 db.execSQL("ALTER TABLE sync_state ADD COLUMN error_message TEXT DEFAULT NULL")
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE files ADD COLUMN thumbnail_uri TEXT DEFAULT NULL")
             }
         }
     }

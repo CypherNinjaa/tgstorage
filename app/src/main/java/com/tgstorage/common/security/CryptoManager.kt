@@ -1,10 +1,12 @@
 package com.tgstorage.common.security
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 
 /**
@@ -79,5 +81,16 @@ object CryptoManager {
                 .build()
         )
         return keyGenerator.generateKey()
+    }
+
+    fun isHardwareBacked(): Boolean {
+        return try {
+            val key = getOrCreateKey()
+            val factory = SecretKeyFactory.getInstance(key.algorithm, ANDROID_KEYSTORE)
+            val keyInfo = factory.getKeySpec(key, KeyInfo::class.java) as KeyInfo
+            keyInfo.isInsideSecureHardware
+        } catch (_: Exception) {
+            false
+        }
     }
 }
