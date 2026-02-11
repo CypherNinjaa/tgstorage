@@ -90,25 +90,67 @@ class TelegramRepository(
     ): Result<TelegramMessage> = api.sendDocument(token, chatId, file, fileName)
 
     /**
-     * Auto-detect channels/groups the bot has been added to via getUpdates.
-     * Looks for my_chat_member updates where the bot became an administrator.
+     * Auto-detect channels/groups the bot has access to via getUpdates.
+     * Extracts chats from ALL update types:
+     *  - my_chat_member: bot was added/promoted (one-shot, expires 24h)
+     *  - channel_post: any post in a channel where the bot is admin
+     *  - message: any message in a group/supergroup the bot can see
+     * This is much more reliable than relying on my_chat_member alone.
      */
     suspend fun detectChannels(token: String): List<DetectedChannel> {
         val updates = api.getUpdates(token).getOrNull() ?: return emptyList()
-        return updates
-            .mapNotNull { it.myChatMember }
-            .filter { member ->
-                member.newChatMember.status in listOf("administrator", "member", "creator") &&
-                        member.chat.type in listOf("channel", "supergroup", "group")
+        val validTypes = setOf("channel", "supergroup", "group")
+        val detectedChats = mutableMapOf<Long, DetectedChannel>()
+
+        for (update in updates) {
+            // 1. From my_chat_member — bot was added/promoted
+            update.myChatMember?.let { member ->
+                val chat = member.chat
+                if (chat.type in validTypes &&
+                    member.newChatMember.status in listOf("administrator", "member", "creator")
+                ) {
+                    detectedChats[chat.id] = DetectedChannel(
+                        id = chat.id,
+                        title = chat.title ?: "Unknown",
+                        username = chat.username,
+                        type = chat.type,
+                    )
+                }
             }
-            .map { member ->
-                DetectedChannel(
-                    id = member.chat.id,
-                    title = member.chat.title ?: "Unknown",
-                    username = member.chat.username,
-                    type = member.chat.type,
-                )
+
+            // 2. From channel_post — bot receives posts from channels it's admin of
+            update.channelPost?.let { msg ->
+                val chat = msg.chat
+                if (chat.type in validTypes) {
+                    detectedChats.putIfAbsent(
+                        chat.id,
+                        DetectedChannel(
+                            id = chat.id,
+                            title = chat.title ?: "Unknown",
+                            username = chat.username,
+                            type = chat.type,
+                        ),
+                    )
+                }
             }
-            .distinctBy { it.id }
+
+            // 3. From message — bot receives messages in groups
+            update.message?.let { msg ->
+                val chat = msg.chat
+                if (chat.type in validTypes) {
+                    detectedChats.putIfAbsent(
+                        chat.id,
+                        DetectedChannel(
+                            id = chat.id,
+                            title = chat.title ?: "Unknown",
+                            username = chat.username,
+                            type = chat.type,
+                        ),
+                    )
+                }
+            }
+        }
+
+        return detectedChats.values.toList()
     }
 }

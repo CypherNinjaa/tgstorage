@@ -76,6 +76,8 @@ data class TelegramChatFullInfo(
 @Serializable
 data class TelegramUpdate(
     @SerialName("update_id") val updateId: Long,
+    val message: TelegramMessage? = null,
+    @SerialName("channel_post") val channelPost: TelegramMessage? = null,
     @SerialName("my_chat_member") val myChatMember: ChatMemberUpdated? = null,
 )
 

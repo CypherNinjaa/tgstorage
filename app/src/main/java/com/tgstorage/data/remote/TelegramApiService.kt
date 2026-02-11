@@ -13,6 +13,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okio.Buffer
 import okio.BufferedSink
@@ -218,23 +219,30 @@ class TelegramApiService {
     }
 
     /**
-     * GET /getUpdates — fetches recent updates.
+     * POST /getUpdates — fetches recent updates.
      * Used to auto-detect channels the bot has been added to.
+     * Uses POST with JSON body to properly serialize the allowed_updates array.
      */
     suspend fun getUpdates(
         token: String,
-        allowedUpdates: List<String> = listOf("my_chat_member"),
-    ): Result<List<TelegramUpdate>> {
-        val updatesParam = allowedUpdates.joinToString(",") { "\"$it\"" }
-        val url = "${BASE_URL}${token}/getUpdates?allowed_updates=[$updatesParam]"
-        return executeGet(
-            url = url,
-            deserialize = { body ->
-                val resp = json.decodeFromString<TelegramResponse<List<TelegramUpdate>>>(body)
-                if (resp.ok && resp.result != null) resp.result
-                else throw TelegramApiException(resp.description ?: "getUpdates failed", resp.errorCode)
-            },
-        )
+    ): Result<List<TelegramUpdate>> = withContext(Dispatchers.IO) {
+        runCatching {
+            // Request all default update types (includes message, channel_post, my_chat_member)
+            // Don't pass allowed_updates — defaults include everything except
+            // chat_member, message_reaction, message_reaction_count
+            val jsonBody = "{}"
+            val requestBody = jsonBody.toRequestBody(
+                "application/json; charset=utf-8".toMediaType(),
+            )
+            val request = Request.Builder()
+                .url("${BASE_URL}${token}/getUpdates")
+                .post(requestBody)
+                .build()
+            val responseBody = client.newCall(request).await()
+            val resp = json.decodeFromString<TelegramResponse<List<TelegramUpdate>>>(responseBody)
+            if (resp.ok && resp.result != null) resp.result
+            else throw TelegramApiException(resp.description ?: "getUpdates failed", resp.errorCode)
+        }
     }
 
     // ─── Helpers ────────────────────────────────────────
