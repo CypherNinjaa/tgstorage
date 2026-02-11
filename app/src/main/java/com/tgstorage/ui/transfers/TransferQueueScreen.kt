@@ -2,7 +2,9 @@ package com.tgstorage.ui.transfers
 
 import android.text.format.DateUtils
 import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +23,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AudioFile
@@ -42,13 +45,19 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.CloudDone
+import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -83,9 +92,11 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.material3.LocalContentColor
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.tgstorage.data.local.dao.FailedFileInfo
 import com.tgstorage.data.local.dao.UploadedFileInfo
 import com.tgstorage.data.local.entity.FileEntity
 import com.tgstorage.data.transfer.TransferProgress
@@ -172,6 +183,17 @@ fun TransferQueueScreen(
                         Text(if (count > 0) "Uploaded ($count)" else "Uploaded")
                     },
                 )
+                Tab(
+                    selected = state.selectedTab == 2,
+                    onClick = { viewModel.selectTab(2) },
+                    text = {
+                        val count = state.failedTabCount
+                        Text(
+                            text = if (count > 0) "Failed ($count)" else "Failed",
+                            color = if (count > 0) MaterialTheme.colorScheme.error else LocalContentColor.current,
+                        )
+                    },
+                )
             }
 
             // ── Tab content ─────────────────────────────
@@ -211,6 +233,25 @@ fun TransferQueueScreen(
                     onToggleView = viewModel::toggleUploadedViewMode,
                     onLoadMore = viewModel::loadMoreUploaded,
                     onShowInfo = { infoSheet = it },
+                    // Bulk selection
+                    isSelectionMode = state.isSelectionMode,
+                    selectedFileIds = state.selectedFileIds,
+                    onLongPress = viewModel::enterSelectionMode,
+                    onToggleSelection = viewModel::toggleFileSelection,
+                    onSelectAll = viewModel::selectAllFiles,
+                    onDeselectAll = viewModel::deselectAllFiles,
+                    onDownloadSelected = viewModel::downloadSelected,
+                    onExitSelection = viewModel::exitSelectionMode,
+                    // Preview
+                    onPreview = viewModel::previewFile,
+                )
+                2 -> FailedTab(
+                    files = state.failedFiles,
+                    isLoading = state.isLoadingFailed,
+                    retryingIds = state.retryingIds,
+                    isRetryingAll = state.isRetryingAll,
+                    onRetry = viewModel::retryFailedFile,
+                    onRetryAll = viewModel::retryAllFailedUploads,
                 )
             }
         }
@@ -232,6 +273,21 @@ fun TransferQueueScreen(
                 onClose = { infoSheet = null },
             )
         }
+    }
+
+    // ── Online Preview Dialog ────────────────────────
+    if (state.previewFile != null) {
+        PreviewDialog(
+            file = state.previewFile!!,
+            previewUrl = state.previewUrl,
+            isLoading = state.isLoadingPreview,
+            onDismiss = viewModel::dismissPreview,
+            onOpenExternal = viewModel::openPreviewExternally,
+            onDownload = {
+                state.previewFile?.let { viewModel.enqueueDownload(it) }
+                viewModel.dismissPreview()
+            },
+        )
     }
 }
 
@@ -555,6 +611,7 @@ private fun SearchAndFilterRow(
 
 // ─── Uploaded tab ──────────────────────────────────────
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun UploadedTab(
     files: List<UploadedFileInfo>,
@@ -571,70 +628,164 @@ private fun UploadedTab(
     onToggleView: () -> Unit,
     onLoadMore: () -> Unit,
     onShowInfo: (TransferInfoSheetData) -> Unit,
+    // Bulk selection
+    isSelectionMode: Boolean,
+    selectedFileIds: Set<Long>,
+    onLongPress: (Long) -> Unit,
+    onToggleSelection: (Long) -> Unit,
+    onSelectAll: () -> Unit,
+    onDeselectAll: () -> Unit,
+    onDownloadSelected: () -> Unit,
+    onExitSelection: () -> Unit,
+    // Preview
+    onPreview: (UploadedFileInfo) -> Unit,
 ) {
-    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        // ── Sticky search + filter (outside scroll) ────
-        SearchAndFilterRow(
-            query = searchQuery,
-            onQueryChange = onSearchChange,
-            filter = filter,
-            onFilterChange = onFilterChange,
-            placeholder = "Search uploads...",
-            viewMode = viewMode,
-            onToggleView = onToggleView,
-        )
-
-        if (isLoading && files.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
-            }
-        } else if (files.isEmpty()) {
-            Spacer(Modifier.height(24.dp))
-            EmptyState(
-                icon = Icons.Outlined.CloudDone,
-                title = if (searchQuery.isNotBlank() || filter != TransferFileFilter.ALL)
-                    "No matching uploads" else "No uploaded files",
-                subtitle = if (searchQuery.isNotBlank() || filter != TransferFileFilter.ALL)
-                    "Try a different search or filter"
-                else "Files you upload to Telegram will appear here",
-                modifier = Modifier.fillMaxSize(),
-            )
-        } else {
-            Text(
-                "$totalCount file(s) in Telegram cloud",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(top = 12.dp, bottom = 8.dp),
-            )
-
-            // Group by date for visual sections
-            val dateFormat = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault())
-            val grouped = files.groupBy { file ->
-                val ts = file.uploadedAt ?: file.updatedAt
-                dateFormat.format(Date(ts))
-            }
-
-            if (viewMode == TransferViewMode.LIST) {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+    Column(Modifier.fillMaxSize()) {
+        // ── Selection bar ─────────────────────────────
+        if (isSelectionMode) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.primaryContainer)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onExitSelection) {
+                    Icon(Icons.Filled.Close, "Exit selection")
+                }
+                Text(
+                    "${selectedFileIds.size} selected",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    onClick = {
+                        if (selectedFileIds.size == files.size) onDeselectAll() else onSelectAll()
+                    },
                 ) {
-                    grouped.forEach { (date, group) ->
-                        item(key = "header_$date") {
-                            Text(
-                                date,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
-                            )
+                    Icon(Icons.Filled.SelectAll, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (selectedFileIds.size == files.size) "Deselect all" else "Select all")
+                }
+                Button(
+                    onClick = onDownloadSelected,
+                    enabled = selectedFileIds.isNotEmpty(),
+                ) {
+                    Icon(Icons.Filled.Download, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Download (${selectedFileIds.size})")
+                }
+            }
+        }
+
+        Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+            // ── Sticky search + filter (outside scroll) ────
+            SearchAndFilterRow(
+                query = searchQuery,
+                onQueryChange = onSearchChange,
+                filter = filter,
+                onFilterChange = onFilterChange,
+                placeholder = "Search uploads...",
+                viewMode = viewMode,
+                onToggleView = onToggleView,
+            )
+
+            if (isLoading && files.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            } else if (files.isEmpty()) {
+                Spacer(Modifier.height(24.dp))
+                EmptyState(
+                    icon = Icons.Outlined.CloudDone,
+                    title = if (searchQuery.isNotBlank() || filter != TransferFileFilter.ALL)
+                        "No matching uploads" else "No uploaded files",
+                    subtitle = if (searchQuery.isNotBlank() || filter != TransferFileFilter.ALL)
+                        "Try a different search or filter"
+                    else "Files you upload to Telegram will appear here",
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Text(
+                    if (isSelectionMode) "$totalCount file(s) • Long-press or tap to select"
+                    else "$totalCount file(s) in Telegram cloud • Long-press to select",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(top = 12.dp, bottom = 8.dp),
+                )
+
+                // Group by date for visual sections
+                val dateFormat = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault())
+                val grouped = files.groupBy { file ->
+                    val ts = file.uploadedAt ?: file.updatedAt
+                    dateFormat.format(Date(ts))
+                }
+
+                if (viewMode == TransferViewMode.LIST) {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        grouped.forEach { (date, group) ->
+                            item(key = "header_$date") {
+                                Text(
+                                    date,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
+                                )
+                            }
+                            items(group, key = { it.id }) { file ->
+                                UploadedFileCard(
+                                    file = file,
+                                    isDownloading = file.id in downloadingIds,
+                                    isSelectionMode = isSelectionMode,
+                                    isSelected = file.id in selectedFileIds,
+                                    onDownload = { onDownload(file) },
+                                    onLongPress = { onLongPress(file.id) },
+                                    onClick = {
+                                        if (isSelectionMode) onToggleSelection(file.id)
+                                        else onShowInfo(
+                                            TransferInfoSheetData(
+                                                fileId = file.id,
+                                                name = file.name,
+                                                size = file.size,
+                                                mimeType = file.mimeType,
+                                                uploadedAt = file.uploadedAt ?: file.updatedAt,
+                                                typeLabel = "Uploaded",
+                                            )
+                                        )
+                                    },
+                                    onPreview = { onPreview(file) },
+                                )
+                            }
                         }
-                        items(group, key = { it.id }) { file ->
-                            UploadedFileCard(
+                        if (hasMore) {
+                            item(key = "load_more") {
+                                LoadMoreRow(files.size, totalCount, isLoading, onLoadMore)
+                            }
+                        }
+                        item { Spacer(Modifier.height(80.dp)) }
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 150.dp),
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items(files, key = { it.id }) { file ->
+                            UploadedFileGridItem(
                                 file = file,
                                 isDownloading = file.id in downloadingIds,
+                                isSelectionMode = isSelectionMode,
+                                isSelected = file.id in selectedFileIds,
                                 onDownload = { onDownload(file) },
-                                onShowInfo = {
-                                    onShowInfo(
+                                onLongPress = { onLongPress(file.id) },
+                                onClick = {
+                                    if (isSelectionMode) onToggleSelection(file.id)
+                                    else onShowInfo(
                                         TransferInfoSheetData(
                                             fileId = file.id,
                                             name = file.name,
@@ -645,74 +796,68 @@ private fun UploadedTab(
                                         )
                                     )
                                 },
+                                onPreview = { onPreview(file) },
                             )
                         }
-                    }
-                    if (hasMore) {
-                        item(key = "load_more") {
-                            LoadMoreRow(files.size, totalCount, isLoading, onLoadMore)
+                        if (hasMore) {
+                            item(span = { GridItemSpan(maxLineSpan) }) {
+                                LoadMoreRow(files.size, totalCount, isLoading, onLoadMore)
+                            }
                         }
+                        item(span = { GridItemSpan(maxLineSpan) }) { Spacer(Modifier.height(80.dp)) }
                     }
-                    item { Spacer(Modifier.height(80.dp)) }
-                }
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 150.dp),
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    items(files, key = { it.id }) { file ->
-                        UploadedFileGridItem(
-                            file = file,
-                            isDownloading = file.id in downloadingIds,
-                            onDownload = { onDownload(file) },
-                            onShowInfo = {
-                                onShowInfo(
-                                    TransferInfoSheetData(
-                                        fileId = file.id,
-                                        name = file.name,
-                                        size = file.size,
-                                        mimeType = file.mimeType,
-                                        uploadedAt = file.uploadedAt ?: file.updatedAt,
-                                        typeLabel = "Uploaded",
-                                    )
-                                )
-                            },
-                        )
-                    }
-                    if (hasMore) {
-                        item(span = { GridItemSpan(maxLineSpan) }) {
-                            LoadMoreRow(files.size, totalCount, isLoading, onLoadMore)
-                        }
-                    }
-                    item(span = { GridItemSpan(maxLineSpan) }) { Spacer(Modifier.height(80.dp)) }
                 }
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun UploadedFileCard(
     file: UploadedFileInfo,
     isDownloading: Boolean,
+    isSelectionMode: Boolean,
+    isSelected: Boolean,
     onDownload: () -> Unit,
-    onShowInfo: () -> Unit,
+    onLongPress: () -> Unit,
+    onClick: () -> Unit,
+    onPreview: () -> Unit,
 ) {
     val thumbPath = ThumbnailManager.resolveThumbnailPath(file.localUri, file.thumbnailUri, file.mimeType)
     val timeFormat = SimpleDateFormat("hh:mm a", Locale.getDefault())
     val uploadTime = timeFormat.format(Date(file.uploadedAt ?: file.updatedAt))
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-        onClick = onShowInfo,
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongPress,
+            ),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected)
+                MaterialTheme.colorScheme.primaryContainer
+            else MaterialTheme.colorScheme.surfaceVariant,
+        ),
     ) {
         Row(
             modifier = Modifier.padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // Selection checkbox or thumbnail
+            if (isSelectionMode) {
+                Icon(
+                    imageVector = if (isSelected) Icons.Outlined.CheckCircle
+                    else Icons.Outlined.RadioButtonUnchecked,
+                    contentDescription = if (isSelected) "Selected" else "Not selected",
+                    tint = if (isSelected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(28.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+            }
+
             // Thumbnail / icon
             Box(
                 modifier = Modifier.size(56.dp)
@@ -762,37 +907,60 @@ private fun UploadedFileCard(
                     color = MaterialTheme.colorScheme.primary,
                 )
             }
-            // Download button or loading indicator
-            if (isDownloading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(24.dp),
-                    strokeWidth = 2.dp,
-                )
-            } else {
-                IconButton(onClick = onDownload) {
-                    Icon(Icons.Filled.Download, "Download",
-                        tint = MaterialTheme.colorScheme.primary)
+            // Action buttons (hidden during selection mode)
+            if (!isSelectionMode) {
+                // Preview button (eye icon)
+                if (isPreviewable(file.mimeType)) {
+                    IconButton(onClick = onPreview) {
+                        Icon(Icons.Filled.Visibility, "Preview",
+                            tint = MaterialTheme.colorScheme.secondary)
+                    }
+                }
+                // Download button or loading indicator
+                if (isDownloading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    IconButton(onClick = onDownload) {
+                        Icon(Icons.Filled.Download, "Download",
+                            tint = MaterialTheme.colorScheme.primary)
+                    }
                 }
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun UploadedFileGridItem(
     file: UploadedFileInfo,
     isDownloading: Boolean,
+    isSelectionMode: Boolean,
+    isSelected: Boolean,
     onDownload: () -> Unit,
-    onShowInfo: () -> Unit,
+    onLongPress: () -> Unit,
+    onClick: () -> Unit,
+    onPreview: () -> Unit,
 ) {
     val isImage = file.mimeType.startsWith("image/")
     val isVideo = file.mimeType.startsWith("video/")
     val thumbPath = ThumbnailManager.resolveThumbnailPath(file.localUri, file.thumbnailUri, file.mimeType)
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-        onClick = onShowInfo,
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongPress,
+            ),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected)
+                MaterialTheme.colorScheme.primaryContainer
+            else MaterialTheme.colorScheme.surfaceVariant,
+        ),
     ) {
         Column(Modifier.padding(8.dp)) {
             Box(
@@ -829,6 +997,25 @@ private fun UploadedFileGridItem(
                         strokeWidth = 2.dp,
                     )
                 }
+
+                // Selection indicator overlay (top-left)
+                if (isSelectionMode) {
+                    Icon(
+                        imageVector = if (isSelected) Icons.Outlined.CheckCircle
+                        else Icons.Outlined.RadioButtonUnchecked,
+                        contentDescription = null,
+                        tint = if (isSelected) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(4.dp)
+                            .size(24.dp)
+                            .background(
+                                MaterialTheme.colorScheme.surface.copy(alpha = 0.7f),
+                                CircleShape,
+                            ),
+                    )
+                }
             }
 
             Spacer(Modifier.height(8.dp))
@@ -847,7 +1034,14 @@ private fun UploadedFileGridItem(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f),
                 )
-                if (!isDownloading) {
+                if (!isSelectionMode && !isDownloading) {
+                    if (isPreviewable(file.mimeType)) {
+                        IconButton(onClick = onPreview, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Filled.Visibility, "Preview",
+                                tint = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.size(18.dp))
+                        }
+                    }
                     IconButton(onClick = onDownload, modifier = Modifier.size(28.dp)) {
                         Icon(Icons.Filled.Download, "Download",
                             tint = MaterialTheme.colorScheme.primary)
@@ -875,6 +1069,125 @@ private fun LoadMoreRow(visibleCount: Int, totalCount: Int, isLoading: Boolean, 
             }
         }
     }
+}
+
+// ─── Preview Dialog ────────────────────────────────────
+
+/**
+ * Returns true if this mime type can be previewed online via the Telegram URL.
+ * Images, videos, audio, and PDFs are previewable.
+ */
+private fun isPreviewable(mimeType: String): Boolean = when {
+    mimeType.startsWith("image/") -> true
+    mimeType.startsWith("video/") -> true
+    mimeType.startsWith("audio/") -> true
+    mimeType == "application/pdf" -> true
+    mimeType.startsWith("text/") -> true
+    else -> false
+}
+
+@Composable
+private fun PreviewDialog(
+    file: UploadedFileInfo,
+    previewUrl: String?,
+    isLoading: Boolean,
+    onDismiss: () -> Unit,
+    onOpenExternal: () -> Unit,
+    onDownload: () -> Unit,
+) {
+    val isImage = file.mimeType.startsWith("image/")
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(fileMimeIcon(file.mimeType), null,
+                    tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    file.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                if (isLoading) {
+                    CircularProgressIndicator(modifier = Modifier.padding(32.dp))
+                    Spacer(Modifier.height(8.dp))
+                    Text("Loading preview...", style = MaterialTheme.typography.bodySmall)
+                } else if (previewUrl != null) {
+                    if (isImage) {
+                        // Show image preview via Coil from the Telegram URL
+                        AsyncImage(
+                            model = ImageRequest.Builder(androidx.compose.ui.platform.LocalContext.current)
+                                .data(previewUrl)
+                                .crossfade(true)
+                                .build(),
+                            contentDescription = file.name,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(300.dp)
+                                .clip(RoundedCornerShape(12.dp)),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                        )
+                    } else {
+                        // For non-image files, show info with option to open externally
+                        Icon(
+                            fileMimeIcon(file.mimeType),
+                            null,
+                            modifier = Modifier.size(64.dp).padding(16.dp),
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                        Text(
+                            "Preview ready",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "${formatSize(file.size)} • ${file.mimeType}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Tap \"Open\" to view in browser or an external app",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (previewUrl != null) {
+                    TextButton(onClick = onDownload) {
+                        Icon(Icons.Filled.Download, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Download")
+                    }
+                    Button(onClick = onOpenExternal) {
+                        Icon(Icons.Filled.OpenInNew, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Open")
+                    }
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        },
+    )
 }
 
 @Composable
@@ -1176,4 +1489,172 @@ private fun formatSize(bytes: Long): String = when {
     bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
     bytes < 1024 * 1024 * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
     else -> "%.2f GB".format(bytes / (1024.0 * 1024.0 * 1024.0))
+}
+
+// ─── Failed Tab ────────────────────────────────────────
+
+@Composable
+private fun FailedTab(
+    files: List<FailedFileInfo>,
+    isLoading: Boolean,
+    retryingIds: Set<Long>,
+    isRetryingAll: Boolean,
+    onRetry: (FailedFileInfo) -> Unit,
+    onRetryAll: () -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Retry All button
+        if (files.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                Button(
+                    onClick = onRetryAll,
+                    enabled = !isRetryingAll,
+                ) {
+                    if (isRetryingAll) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    } else {
+                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    Text("Retry All (${files.size})")
+                }
+            }
+        }
+
+        when {
+            isLoading -> {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            }
+            files.isEmpty() -> {
+                EmptyState(
+                    icon = Icons.Filled.CheckCircle,
+                    title = "No Failed Uploads",
+                    subtitle = "All your files have been uploaded successfully.",
+                )
+            }
+            else -> {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(files, key = { it.id }) { file ->
+                        FailedFileCard(
+                            file = file,
+                            isRetrying = file.id in retryingIds,
+                            onRetry = { onRetry(file) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FailedFileCard(
+    file: FailedFileInfo,
+    isRetrying: Boolean,
+    onRetry: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f),
+        ),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Icon based on mime type
+            Icon(
+                imageVector = getFileIcon(file.mimeType),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(40.dp),
+            )
+
+            Spacer(Modifier.width(12.dp))
+
+            // File info
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = file.name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = formatSize(file.size),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                )
+                // Error message
+                if (!file.errorMessage.isNullOrBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = file.errorMessage,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                // Retry count
+                if (file.retryCount > 0) {
+                    Text(
+                        text = "Retried ${file.retryCount} time(s)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    )
+                }
+            }
+
+            Spacer(Modifier.width(8.dp))
+
+            // Retry button
+            Button(
+                onClick = onRetry,
+                enabled = !isRetrying,
+            ) {
+                if (isRetrying) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                } else {
+                    Icon(
+                        Icons.Filled.Refresh,
+                        contentDescription = "Retry",
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun getFileIcon(mimeType: String): ImageVector = when {
+    mimeType.startsWith("image/") -> Icons.Filled.Image
+    mimeType.startsWith("video/") -> Icons.Filled.VideoFile
+    mimeType.startsWith("audio/") -> Icons.Filled.AudioFile
+    mimeType.startsWith("text/") || mimeType.contains("document") || mimeType.contains("pdf") -> Icons.Filled.Description
+    else -> Icons.AutoMirrored.Filled.InsertDriveFile
 }

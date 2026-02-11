@@ -357,29 +357,35 @@ class ChunkManager(
                     val tgFileId = chunk.telegramFileId
                         ?: throw IllegalStateException("Chunk ${chunk.chunkIndex} has no Telegram file_id")
 
-                    // Get file path from Telegram
-                    val tgFile = retryWithBackoff(MAX_RETRIES) {
-                        api.getFile(token, tgFileId).getOrThrow()
+                    // Get file path (cached — avoids redundant API calls)
+                    val filePath = retryWithBackoff(MAX_RETRIES) {
+                        api.getFilePathCached(token, tgFileId).getOrThrow()
                     }
-                    val filePath = tgFile.filePath
-                        ?: throw IllegalStateException("No file_path for chunk ${chunk.chunkIndex}")
 
-                    // Download chunk bytes
-                    val chunkBytes = retryWithBackoff(MAX_RETRIES) {
-                        api.downloadFile(token, filePath).getOrThrow()
-                    }
-                    val plainBytes = if (decrypt) CryptoManager.decrypt(chunkBytes) else chunkBytes
-
-                    // Verify checksum
-                    if (chunk.checksum.isNotBlank()) {
-                        val downloadedChecksum = computeSha256(plainBytes)
-                        if (downloadedChecksum != chunk.checksum) {
-                            throw SecurityException("Checksum mismatch for chunk ${chunk.chunkIndex}")
+                    // Stream download to temp file then read bytes for decrypt/verify
+                    val tempChunkFile = File(context.cacheDir, "dl_chunk_${fileId}_${chunk.chunkIndex}")
+                    try {
+                        retryWithBackoff(MAX_RETRIES) {
+                            FileOutputStream(tempChunkFile).use { tempOut ->
+                                api.downloadFileStreaming(token, filePath, tempOut).getOrThrow()
+                            }
                         }
-                    }
+                        val chunkBytes = tempChunkFile.readBytes()
+                        val plainBytes = if (decrypt) CryptoManager.decrypt(chunkBytes) else chunkBytes
 
-                    output.write(plainBytes)
-                    bytesDownloaded += plainBytes.size
+                        // Verify checksum
+                        if (chunk.checksum.isNotBlank()) {
+                            val downloadedChecksum = computeSha256(plainBytes)
+                            if (downloadedChecksum != chunk.checksum) {
+                                throw SecurityException("Checksum mismatch for chunk ${chunk.chunkIndex}")
+                            }
+                        }
+
+                        output.write(plainBytes)
+                        bytesDownloaded += plainBytes.size
+                    } finally {
+                        tempChunkFile.delete()
+                    }
 
                     progressFlow.value = progressFlow.value.copy(
                         currentChunk = index + 1,

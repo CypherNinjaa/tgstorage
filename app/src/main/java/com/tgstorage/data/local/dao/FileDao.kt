@@ -22,6 +22,19 @@ data class UploadedFileInfo(
     val telegramFileId: String?,
 )
 
+/** Projection for failed files — includes error message and retry count */
+data class FailedFileInfo(
+    val id: Long,
+    val name: String,
+    val size: Long,
+    val mimeType: String,
+    val localUri: String?,
+    val thumbnailUri: String?,
+    val failedAt: Long?,
+    val errorMessage: String?,
+    val retryCount: Int,
+)
+
 /** Projection for storage stats — file type breakdown */
 data class FileTypeStats(
     val category: String,
@@ -122,6 +135,39 @@ interface FileDao {
     /** Total uploaded count (for tab header) — reactive Flow */
     @Query("SELECT COUNT(*) FROM sync_state WHERE status = 'uploaded'")
     fun getUploadedTotalCount(): Flow<Int>
+
+    // ── Failed Files Queries ────────────────────────
+
+    /** Get all failed files with their error info */
+    @Query("""
+        SELECT f.id, f.name, f.size, f.mime_type AS mimeType, f.local_uri AS localUri,
+               f.thumbnail_uri AS thumbnailUri,
+               s.last_attempt AS failedAt, s.error_message AS errorMessage,
+               s.retry_count AS retryCount
+        FROM files f
+        INNER JOIN sync_state s ON f.id = s.file_id
+        WHERE s.status = 'failed'
+        ORDER BY s.last_attempt DESC
+    """)
+    fun getFailedFilesDetailed(): Flow<List<FailedFileInfo>>
+
+    /** Get failed files count */
+    @Query("SELECT COUNT(*) FROM sync_state WHERE status = 'failed'")
+    fun getFailedTotalCount(): Flow<Int>
+
+    /** Paginated failed files */
+    @Query("""
+        SELECT f.id, f.name, f.size, f.mime_type AS mimeType, f.local_uri AS localUri,
+               f.thumbnail_uri AS thumbnailUri,
+               s.last_attempt AS failedAt, s.error_message AS errorMessage,
+               s.retry_count AS retryCount
+        FROM files f
+        INNER JOIN sync_state s ON f.id = s.file_id
+        WHERE s.status = 'failed'
+        ORDER BY s.last_attempt DESC
+        LIMIT :limit OFFSET :offset
+    """)
+    suspend fun getFailedFilesPaged(limit: Int, offset: Int): List<FailedFileInfo>
 
     /** Clear the local_uri after upload to free storage */
     @Query("UPDATE files SET local_uri = NULL WHERE id = :fileId")

@@ -44,6 +44,11 @@ class TelegramApiService {
             .writeTimeout(60, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
+
+        /** Download-specific client with longer read timeout for large chunks */
+        val downloadClient: OkHttpClient = sharedClient.newBuilder()
+            .readTimeout(120, TimeUnit.SECONDS)
+            .build()
     }
 
     private val client: OkHttpClient get() = sharedClient
@@ -172,11 +177,75 @@ class TelegramApiService {
             val request = Request.Builder()
                 .url("${FILE_URL}${token}/${filePath}")
                 .build()
-            val response = client.newCall(request).execute()
+            val response = downloadClient.newCall(request).execute()
             if (!response.isSuccessful) {
                 throw TelegramApiException("Download failed: ${response.code}", response.code)
             }
             response.body?.bytes() ?: throw TelegramApiException("Empty response body", null)
+        }
+    }
+
+    /**
+     * Download file by streaming directly to an OutputStream.
+     * Much faster than loading entire file into memory as ByteArray.
+     * Uses dedicated download client with longer read timeout.
+     * Supports progress callbacks for UI progress tracking.
+     */
+    suspend fun downloadFileStreaming(
+        token: String,
+        filePath: String,
+        outputStream: java.io.OutputStream,
+        onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null,
+    ): Result<Long> = withContext(Dispatchers.IO) {
+        runCatching {
+            val request = Request.Builder()
+                .url("${FILE_URL}${token}/${filePath}")
+                .build()
+            val response = downloadClient.newCall(request).execute()
+            if (!response.isSuccessful) {
+                throw TelegramApiException("Download failed: ${response.code}", response.code)
+            }
+            val body = response.body ?: throw TelegramApiException("Empty response body", null)
+            val totalBytes = body.contentLength()
+            var bytesRead = 0L
+            val buffer = ByteArray(64 * 1024) // 64KB buffer for fast streaming
+            body.byteStream().use { input ->
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read == -1) break
+                    outputStream.write(buffer, 0, read)
+                    bytesRead += read
+                    onProgress?.invoke(bytesRead, totalBytes)
+                }
+            }
+            outputStream.flush()
+            bytesRead
+        }
+    }
+
+    // ─── File path cache ─────────────────────────────
+    // Telegram says file_path links are valid for at least 1 hour.
+    // Cache them to avoid repeated getFile API calls.
+    private data class CachedFilePath(val path: String, val expiresAt: Long)
+    private val filePathCache = java.util.concurrent.ConcurrentHashMap<String, CachedFilePath>()
+    private val filePathCacheTtl = 50L * 60 * 1000 // 50 minutes (safe margin under 1hr)
+
+    /**
+     * Get file_path with caching. Avoids redundant getFile API calls.
+     */
+    suspend fun getFilePathCached(
+        token: String,
+        fileId: String,
+    ): Result<String> {
+        val cached = filePathCache[fileId]
+        if (cached != null && System.currentTimeMillis() < cached.expiresAt) {
+            return Result.success(cached.path)
+        }
+        return getFile(token, fileId).map { tgFile ->
+            val path = tgFile.filePath
+                ?: throw TelegramApiException("No file_path returned", null)
+            filePathCache[fileId] = CachedFilePath(path, System.currentTimeMillis() + filePathCacheTtl)
+            path
         }
     }
 

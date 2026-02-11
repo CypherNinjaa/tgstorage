@@ -2,11 +2,11 @@ package com.tgstorage.ui.transfers
 
 import android.content.Intent
 import android.net.Uri
-import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.tgstorage.TgStorageApp
+import com.tgstorage.data.local.dao.FailedFileInfo
 import com.tgstorage.data.local.dao.FileDao
 import com.tgstorage.data.local.dao.UploadedFileInfo
 import com.tgstorage.data.local.entity.FileEntity
@@ -38,13 +38,29 @@ data class TransfersUiState(
     val isLoadingUploaded: Boolean = false,
     val hasMorePages: Boolean = false,
 
+    // Failed files list
+    val failedFiles: List<FailedFileInfo> = emptyList(),
+    val failedTabCount: Int = 0,
+    val isLoadingFailed: Boolean = false,
+    val isRetryingAll: Boolean = false,
+
     val selectedTab: Int = 0,
     val downloadingIds: Set<Long> = emptySet(),
+    val retryingIds: Set<Long> = emptySet(),
     val transferSearchQuery: String = "",
     val uploadedSearchQuery: String = "",
     val transferFilter: TransferFileFilter = TransferFileFilter.ALL,
     val uploadedFilter: TransferFileFilter = TransferFileFilter.ALL,
     val uploadedViewMode: TransferViewMode = TransferViewMode.LIST,
+
+    // ── Bulk selection ──
+    val isSelectionMode: Boolean = false,
+    val selectedFileIds: Set<Long> = emptySet(),
+
+    // ── Online preview ──
+    val previewFile: UploadedFileInfo? = null,
+    val previewUrl: String? = null,
+    val isLoadingPreview: Boolean = false,
 
     // Sync stats (merged from SyncDashboard)
     val syncPendingCount: Int = 0,
@@ -96,12 +112,18 @@ class TransferQueueViewModel(
     init {
         observeTransfers()
         observeUploadedTabCount()
+        observeFailedTabCount()
         observeSyncStats()
         loadUploadedPage(reset = true)
+        loadFailedFiles()
     }
 
     fun selectTab(index: Int) {
         _uiState.update { it.copy(selectedTab = index) }
+        // Load failed files when switching to failed tab
+        if (index == 2) {
+            loadFailedFiles()
+        }
     }
 
     fun onTransferSearchChange(query: String) {
@@ -237,18 +259,218 @@ class TransferQueueViewModel(
         TransferManager.clearFinished()
     }
 
+    // ─── Failed Files ──────────────────────────────────
+
+    private fun loadFailedFiles() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoadingFailed = true) }
+            fileDao.getFailedFilesDetailed().collect { files ->
+                _uiState.update { it.copy(failedFiles = files, isLoadingFailed = false) }
+            }
+        }
+    }
+
+    private fun observeFailedTabCount() {
+        viewModelScope.launch {
+            fileDao.getFailedTotalCount().collect { count ->
+                _uiState.update { it.copy(failedTabCount = count) }
+            }
+        }
+    }
+
+    /**
+     * Retry a single failed file upload.
+     * Resets sync state and re-enqueues the upload.
+     */
+    fun retryFailedFile(file: FailedFileInfo) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(retryingIds = it.retryingIds + file.id) }
+            
+            try {
+                // Reset sync state to pending
+                syncRepository.retryFile(file.id)
+                
+                // Get the file entity
+                val fileEntity = fileDao.getFileById(file.id)
+                if (fileEntity != null) {
+                    // Re-enqueue the upload
+                    TransferManager.enqueueUpload(fileEntity)
+                    
+                    // Switch to transfers tab to show progress
+                    _uiState.update { it.copy(selectedTab = 0) }
+                }
+            } finally {
+                _uiState.update { it.copy(retryingIds = it.retryingIds - file.id) }
+            }
+        }
+    }
+
+    /**
+     * Retry all failed uploads.
+     * Resets all failed sync states and re-enqueues them.
+     */
+    fun retryAllFailedUploads() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isRetryingAll = true) }
+            
+            try {
+                // Reset all failed sync states
+                syncRepository.retryAllFailed()
+                
+                // Get all files that were failed (now pending)
+                val pendingUploads = syncRepository.getPendingUploads()
+                
+                // Re-enqueue each file
+                for (syncState in pendingUploads) {
+                    val fileEntity = fileDao.getFileById(syncState.fileId)
+                    if (fileEntity != null) {
+                        TransferManager.enqueueUpload(fileEntity)
+                    }
+                }
+                
+                // Switch to transfers tab
+                _uiState.update { it.copy(selectedTab = 0) }
+            } finally {
+                _uiState.update { it.copy(isRetryingAll = false) }
+            }
+        }
+    }
+
     fun isActive(progress: TransferProgress): Boolean =
         progress.status == TransferStatus.IN_PROGRESS ||
             progress.status == TransferStatus.PENDING ||
             progress.status == TransferStatus.PAUSED
 
+    // ── Bulk Selection ─────────────────────────────────
+
+    fun enterSelectionMode(firstFileId: Long) {
+        _uiState.update {
+            it.copy(isSelectionMode = true, selectedFileIds = setOf(firstFileId))
+        }
+    }
+
+    fun exitSelectionMode() {
+        _uiState.update {
+            it.copy(isSelectionMode = false, selectedFileIds = emptySet())
+        }
+    }
+
+    fun toggleFileSelection(fileId: Long) {
+        _uiState.update {
+            val newSet = if (fileId in it.selectedFileIds)
+                it.selectedFileIds - fileId else it.selectedFileIds + fileId
+            // Exit selection mode if nothing selected
+            if (newSet.isEmpty()) it.copy(isSelectionMode = false, selectedFileIds = emptySet())
+            else it.copy(selectedFileIds = newSet)
+        }
+    }
+
+    fun selectAllFiles() {
+        _uiState.update {
+            it.copy(selectedFileIds = it.uploadedFiles.map { f -> f.id }.toSet())
+        }
+    }
+
+    fun deselectAllFiles() {
+        _uiState.update {
+            it.copy(selectedFileIds = emptySet())
+        }
+    }
+
+    /**
+     * Download all currently selected files as a batch.
+     * Each file is enqueued as a separate download.
+     */
+    fun downloadSelected() {
+        val state = _uiState.value
+        val filesToDownload = state.uploadedFiles.filter { it.id in state.selectedFileIds }
+        if (filesToDownload.isEmpty()) return
+
+        // Enqueue each file
+        for (file in filesToDownload) {
+            enqueueDownload(file)
+        }
+
+        // Exit selection mode and switch to transfers tab
+        _uiState.update {
+            it.copy(isSelectionMode = false, selectedFileIds = emptySet(), selectedTab = 0)
+        }
+    }
+
+    // ── Online Preview ─────────────────────────────────
+
+    /**
+     * Open a file preview by fetching its temporary URL from Telegram.
+     * Works for images, videos, audio, PDFs — Telegram provides a 1-hour-valid link.
+     */
+    fun previewFile(file: UploadedFileInfo) {
+        _uiState.update { it.copy(previewFile = file, isLoadingPreview = true, previewUrl = null) }
+
+        viewModelScope.launch {
+            try {
+                val app = TgStorageApp.instance
+                val db = app.database
+                val api = com.tgstorage.data.remote.TelegramApiService()
+                val metadataDao = db.metadataDao()
+                val chunkDao = db.chunkDao()
+
+                // Get bot token
+                val token = metadataDao.getValue(
+                    com.tgstorage.data.local.entity.MetadataKeys.BOT_TOKEN
+                ) ?: throw IllegalStateException("No bot token configured")
+
+                val decryptedToken = com.tgstorage.common.security.CryptoManager.decrypt(
+                    android.util.Base64.decode(token, android.util.Base64.NO_WRAP)
+                ).decodeToString()
+
+                // Get chunks for this file — we need the first chunk's telegramFileId
+                val chunks = chunkDao.getChunksForFileSync(file.id)
+                if (chunks.isEmpty()) throw IllegalStateException("No chunks for this file")
+
+                // For preview, we use the first (or only) chunk
+                val firstChunk = chunks.first()
+                val tgFileId = firstChunk.telegramFileId
+                    ?: throw IllegalStateException("No Telegram file ID")
+
+                // Get file path from Telegram (cached for 50 min)
+                val filePath = api.getFilePathCached(decryptedToken, tgFileId).getOrThrow()
+
+                // Build the direct download URL
+                val previewUrl = "https://api.telegram.org/file/bot${decryptedToken}/${filePath}"
+
+                _uiState.update {
+                    it.copy(previewUrl = previewUrl, isLoadingPreview = false)
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(isLoadingPreview = false, previewFile = null, previewUrl = null)
+                }
+            }
+        }
+    }
+
+    fun dismissPreview() {
+        _uiState.update {
+            it.copy(previewFile = null, previewUrl = null, isLoadingPreview = false)
+        }
+    }
+
+    fun openPreviewExternally() {
+        val url = _uiState.value.previewUrl ?: return
+        try {
+            val app = TgStorageApp.instance
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            app.startActivity(intent)
+        } catch (_: Exception) { }
+    }
+
     fun enqueueDownload(file: UploadedFileInfo) {
         val app = TgStorageApp.instance
-        val outputDir = java.io.File(
-            app.getExternalFilesDir(null) ?: app.filesDir, "downloads"
-        )
-        if (!outputDir.exists()) outputDir.mkdirs()
-        val outputFile = java.io.File(outputDir, file.name)
+        
+        // Download to temp file first, then copy to public Downloads
+        val tempFile = com.tgstorage.common.StorageUtils.getTempDownloadFile(app, file.name)
 
         _uiState.update { it.copy(downloadingIds = it.downloadingIds + file.id) }
 
@@ -259,7 +481,7 @@ class TransferQueueViewModel(
             mimeType = file.mimeType,
             localUri = file.localUri,
         )
-        TransferManager.enqueueDownload(entity, outputFile)
+        TransferManager.enqueueDownload(entity, tempFile)
         _uiState.update { it.copy(selectedTab = 0) }
 
         viewModelScope.launch {
@@ -267,21 +489,36 @@ class TransferQueueViewModel(
                 val dl = transfers.find { it.fileId == file.id && it.type == TransferType.DOWNLOAD }
                 if (dl?.status == TransferStatus.COMPLETED) {
                     _uiState.update { it.copy(downloadingIds = it.downloadingIds - file.id) }
-                    openFile(outputFile, file.mimeType)
+                    
+                    // Save to public Downloads folder so user can see it in file manager
+                    val savedUri = com.tgstorage.common.StorageUtils.saveToPublicDownloads(
+                        context = app,
+                        sourceFile = tempFile,
+                        fileName = file.name,
+                        mimeType = file.mimeType,
+                    )
+                    
+                    // Clean up temp file
+                    tempFile.delete()
+                    
+                    // Open the downloaded file
+                    if (savedUri != null) {
+                        openFileFromUri(savedUri, file.mimeType)
+                    }
                     return@collect
                 }
                 if (dl?.status == TransferStatus.FAILED || dl?.status == TransferStatus.CANCELLED) {
                     _uiState.update { it.copy(downloadingIds = it.downloadingIds - file.id) }
+                    tempFile.delete() // Clean up on failure too
                     return@collect
                 }
             }
         }
     }
 
-    private fun openFile(file: java.io.File, mimeType: String) {
+    private fun openFileFromUri(uri: Uri, mimeType: String) {
         try {
             val app = TgStorageApp.instance
-            val uri: Uri = FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", file)
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, mimeType)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)

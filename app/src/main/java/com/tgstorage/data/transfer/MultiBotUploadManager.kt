@@ -546,26 +546,35 @@ class MultiBotUploadManager(
             val tgFileId = chunk.telegramFileId
                 ?: throw IllegalStateException("Chunk has no Telegram file_id")
 
-            val tgFile = retryWithBackoff(MAX_RETRIES) {
-                api.getFile(token, tgFileId).getOrThrow()
+            // Use cached file path to avoid redundant API calls
+            val filePath = retryWithBackoff(MAX_RETRIES) {
+                api.getFilePathCached(token, tgFileId).getOrThrow()
             }
-            val filePath = tgFile.filePath
-                ?: throw IllegalStateException("No file_path for chunk")
 
-            val chunkBytes = retryWithBackoff(MAX_RETRIES) {
-                api.downloadFile(token, filePath).getOrThrow()
-            }
-            val plainBytes = if (decrypt) CryptoManager.decrypt(chunkBytes) else chunkBytes
-
-            // Verify checksum
-            if (chunk.checksum.isNotBlank()) {
-                val downloadedChecksum = computeSha256(plainBytes)
-                if (downloadedChecksum != chunk.checksum) {
-                    throw SecurityException("Checksum mismatch for chunk")
+            // Stream download to temp file, then decrypt/verify
+            val tempFile = File(context.cacheDir, "dl_single_${chunk.fileId}_${System.currentTimeMillis()}")
+            try {
+                retryWithBackoff(MAX_RETRIES) {
+                    FileOutputStream(tempFile).use { tempOut ->
+                        api.downloadFileStreaming(token, filePath, tempOut).getOrThrow()
+                    }
                 }
-            }
+                val chunkBytes = tempFile.readBytes()
+                val plainBytes = if (decrypt) CryptoManager.decrypt(chunkBytes) else chunkBytes
 
-            outputFile.writeBytes(plainBytes)
+                // Verify checksum
+                if (chunk.checksum.isNotBlank()) {
+                    val downloadedChecksum = computeSha256(plainBytes)
+                    if (downloadedChecksum != chunk.checksum) {
+                        throw SecurityException("Checksum mismatch for chunk")
+                    }
+                }
+
+                outputFile.writeBytes(plainBytes)
+            } finally {
+                tempFile.delete()
+            }
+            
             progressFlow.value = progressFlow.value.copy(
                 currentChunk = 1,
                 bytesTransferred = totalBytes,
@@ -598,27 +607,35 @@ class MultiBotUploadManager(
                     val tgFileId = chunk.telegramFileId
                         ?: throw IllegalStateException("Chunk ${chunk.chunkIndex} has no file_id")
 
-                    val tgFile = retryWithBackoff(MAX_RETRIES) {
-                        api.getFile(token, tgFileId).getOrThrow()
+                    // Use cached file path
+                    val filePath = retryWithBackoff(MAX_RETRIES) {
+                        api.getFilePathCached(token, tgFileId).getOrThrow()
                     }
-                    val filePath = tgFile.filePath
-                        ?: throw IllegalStateException("No file_path for chunk ${chunk.chunkIndex}")
 
-                    val chunkBytes = retryWithBackoff(MAX_RETRIES) {
-                        api.downloadFile(token, filePath).getOrThrow()
-                    }
-                    val plainBytes = if (decrypt) CryptoManager.decrypt(chunkBytes) else chunkBytes
-
-                    // Verify checksum
-                    if (chunk.checksum.isNotBlank()) {
-                        val downloadedChecksum = computeSha256(plainBytes)
-                        if (downloadedChecksum != chunk.checksum) {
-                            throw SecurityException("Checksum mismatch for chunk ${chunk.chunkIndex}")
+                    // Stream download to temp file
+                    val tempFile = File(context.cacheDir, "dl_seq_${chunks.first().fileId}_${chunk.chunkIndex}")
+                    try {
+                        retryWithBackoff(MAX_RETRIES) {
+                            FileOutputStream(tempFile).use { tempOut ->
+                                api.downloadFileStreaming(token, filePath, tempOut).getOrThrow()
+                            }
                         }
-                    }
+                        val chunkBytes = tempFile.readBytes()
+                        val plainBytes = if (decrypt) CryptoManager.decrypt(chunkBytes) else chunkBytes
 
-                    output.write(plainBytes)
-                    bytesDownloaded += plainBytes.size
+                        // Verify checksum
+                        if (chunk.checksum.isNotBlank()) {
+                            val downloadedChecksum = computeSha256(plainBytes)
+                            if (downloadedChecksum != chunk.checksum) {
+                                throw SecurityException("Checksum mismatch for chunk ${chunk.chunkIndex}")
+                            }
+                        }
+
+                        output.write(plainBytes)
+                        bytesDownloaded += plainBytes.size
+                    } finally {
+                        tempFile.delete()
+                    }
 
                     progressFlow.value = progressFlow.value.copy(
                         currentChunk = index + 1,
@@ -674,15 +691,19 @@ class MultiBotUploadManager(
                             val tgFileId = chunk.telegramFileId
                                 ?: throw IllegalStateException("Chunk ${chunk.chunkIndex} has no file_id")
 
-                            val tgFile = retryWithBackoff(MAX_RETRIES) {
-                                api.getFile(token, tgFileId).getOrThrow()
+                            // Use cached file path
+                            val filePath = retryWithBackoff(MAX_RETRIES) {
+                                api.getFilePathCached(token, tgFileId).getOrThrow()
                             }
-                            val filePath = tgFile.filePath
-                                ?: throw IllegalStateException("No file_path for chunk ${chunk.chunkIndex}")
 
-                            val chunkBytes = retryWithBackoff(MAX_RETRIES) {
-                                api.downloadFile(token, filePath).getOrThrow()
+                            // Stream download to temp file
+                            val tempDlFile = File(tempDir, "dl_${chunk.chunkIndex}")
+                            retryWithBackoff(MAX_RETRIES) {
+                                FileOutputStream(tempDlFile).use { tempOut ->
+                                    api.downloadFileStreaming(token, filePath, tempOut).getOrThrow()
+                                }
                             }
+                            val chunkBytes = tempDlFile.readBytes()
                             val plainBytes = if (decrypt) CryptoManager.decrypt(chunkBytes) else chunkBytes
 
                             // Verify checksum
@@ -693,9 +714,10 @@ class MultiBotUploadManager(
                                 }
                             }
 
-                            // Write to temp file
+                            // Write verified chunk to final temp file
                             val chunkFile = File(tempDir, "chunk_${chunk.chunkIndex}")
                             chunkFile.writeBytes(plainBytes)
+                            tempDlFile.delete()
 
                             // Update progress
                             progressMutex.withLock {
