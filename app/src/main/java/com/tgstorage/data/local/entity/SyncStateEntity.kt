@@ -30,6 +30,12 @@ data class SyncStateEntity(
 
     @ColumnInfo(name = "last_attempt")
     val lastAttempt: Long? = null,
+
+    @ColumnInfo(name = "retry_count", defaultValue = "0")
+    val retryCount: Int = 0,
+
+    @ColumnInfo(name = "error_message", defaultValue = "NULL")
+    val errorMessage: String? = null,
 )
 
 object SyncStatus {

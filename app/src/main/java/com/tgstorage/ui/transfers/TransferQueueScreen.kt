@@ -93,6 +93,9 @@ fun TransferQueueScreen(
             )
         },
     ) { padding ->
+                                title = { Text("Transfers") },
+                                actions = {
+                                    if (state.selectedTab == 0 && state.transfers.any { !viewModel.isActive(it) }) {
         Column(
             modifier = Modifier.fillMaxSize().padding(padding),
         ) {
@@ -117,6 +120,9 @@ fun TransferQueueScreen(
             }
 
             // ── Tab content ─────────────────────────────
+                modifier = Modifier.fillMaxSize().padding(padding),
+            ) {
+                TabRow(selectedTabIndex = state.selectedTab) {
             when (state.selectedTab) {
                 0 -> TransfersTab(
                     transfers = state.transfers,
@@ -167,18 +173,43 @@ private fun TransfersTab(
                 item {
                     Text("Active", style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
+            // Search and filter row
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                androidx.compose.material3.OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    modifier = Modifier.weight(1f),
+                    label = { Text("Search") },
+                    singleLine = true,
+                )
+                Spacer(Modifier.width(8.dp))
+                androidx.compose.material3.SegmentedButton(
+                    options = listOf("All", "Images", "Docs", "Videos", "Audio"),
+                    selectedOption = filterType,
+                    onOptionSelected = { filterType = it },
+                )
+            }
                 }
                 items(active, key = { "${it.fileId}_${it.type}" }) { transfer ->
-                    TransferCard(progress = transfer, onCancel = { onCancel(transfer) })
-                }
-            }
-
-            if (finished.isNotEmpty()) {
-                item {
-                    Text("Completed", style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp))
-                }
-                items(finished, key = { "${it.fileId}_${it.type}_done" }) { transfer ->
+                0 -> TransfersTab(
+                    transfers = state.transfers.filter {
+                        (searchQuery.isEmpty() || it.fileName.contains(searchQuery, ignoreCase = true)) &&
+                        (filterType == "All" || it.mimeType?.startsWith(filterType.lowercase()) == true)
+                    },
+                    isActive = viewModel::isActive,
+                    onCancel = { viewModel.cancelTransfer(it.fileId, it.type) },
+                )
+                1 -> UploadedTab(
+                    files = state.uploadedFiles.filter {
+                        (searchQuery.isEmpty() || it.name.contains(searchQuery, ignoreCase = true)) &&
+                        (filterType == "All" || it.mimeType.startsWith(filterType.lowercase()))
+                    },
+                    downloadingIds = state.downloadingIds,
+                    onDownload = viewModel::enqueueDownload,
+                )
                     TransferCard(progress = transfer, onCancel = null)
                 }
             }

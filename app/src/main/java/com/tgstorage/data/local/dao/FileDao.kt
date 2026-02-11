@@ -27,6 +27,9 @@ interface FileDao {
     @Query("SELECT * FROM files ORDER BY updated_at DESC")
     fun getAllFiles(): Flow<List<FileEntity>>
 
+    @Query("SELECT * FROM files ORDER BY updated_at DESC")
+    suspend fun getAllFilesSync(): List<FileEntity>
+
     @Query("SELECT * FROM files WHERE id = :id")
     suspend fun getFileById(id: Long): FileEntity?
 
