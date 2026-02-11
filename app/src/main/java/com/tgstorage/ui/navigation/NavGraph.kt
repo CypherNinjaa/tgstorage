@@ -18,6 +18,7 @@ import com.tgstorage.ui.home.HomeScreen
 import com.tgstorage.ui.lock.LockScreen
 import com.tgstorage.ui.onboarding.OnboardingScreen
 import com.tgstorage.ui.security.SecurityScreen
+import com.tgstorage.ui.settings.BotSettingsScreen
 import com.tgstorage.ui.settings.SettingsScreen
 import com.tgstorage.ui.splash.SplashScreen
 import com.tgstorage.ui.stats.StorageStatsScreen
@@ -188,6 +189,13 @@ fun TgStorageNavGraph(
                 onNavigateToBackup = { navController.navigate(Screen.BackupRestore.route) },
                 onNavigateToSync = { navController.navigate(Screen.SyncDashboard.route) },
                 onNavigateToStats = { navController.navigate(Screen.StorageStats.route) },
+                onNavigateToBotSettings = { navController.navigate(Screen.BotSettings.route) },
+            )
+        }
+
+        composable(Screen.BotSettings.route) {
+            BotSettingsScreen(
+                onBack = { navController.popBackStack() },
             )
         }
 

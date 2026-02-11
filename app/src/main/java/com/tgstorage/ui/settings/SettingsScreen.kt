@@ -28,6 +28,7 @@ import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.PieChart
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -64,6 +65,7 @@ fun SettingsScreen(
     onNavigateToBackup: () -> Unit,
     onNavigateToSync: () -> Unit,
     onNavigateToStats: () -> Unit,
+    onNavigateToBotSettings: () -> Unit,
     viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.Factory),
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -123,6 +125,22 @@ fun SettingsScreen(
                         Text(if (state.isReverifying) "Verifying..." else "Re-verify")
                     }
                 }
+            }
+            item {
+                ListItem(
+                    headlineContent = { Text("Manage Bots", style = MaterialTheme.typography.bodyLarge) },
+                    supportingContent = { Text("Configure multiple bots for parallel uploads", style = MaterialTheme.typography.bodyMedium) },
+                    leadingContent = { Icon(imageVector = Icons.Outlined.SmartToy, contentDescription = null) },
+                    trailingContent = {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowForwardIos,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    },
+                    modifier = Modifier.clickable { onNavigateToBotSettings() },
+                )
             }
             item { HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp)) }
 

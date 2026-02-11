@@ -6,6 +6,8 @@ import com.tgstorage.common.CrashHandler
 import com.tgstorage.data.local.TgStorageDatabase
 import com.tgstorage.data.local.entity.BackupFrequency
 import com.tgstorage.data.local.entity.MetadataKeys
+import com.tgstorage.data.remote.TelegramApiService
+import com.tgstorage.data.repository.BotRepository
 import com.tgstorage.data.sync.AutoBackupWorker
 import com.tgstorage.data.sync.AutoRetryWorker
 import com.tgstorage.data.sync.BackupWorker
@@ -39,12 +41,23 @@ class TgStorageApp : Application() {
                 TgStorageDatabase.MIGRATION_1_2,
                 TgStorageDatabase.MIGRATION_2_3,
                 TgStorageDatabase.MIGRATION_3_4,
+                TgStorageDatabase.MIGRATION_4_5,
             )
             .build()
 
         // Create notification channels
         SyncWorker.createNotificationChannel(this)
         BackupWorker.createNotificationChannel(this)
+
+        // Migrate legacy single-bot to multi-bot table
+        appScope.launch {
+            val botRepo = BotRepository(
+                botDao = database.botDao(),
+                metadataDao = database.metadataDao(),
+                api = TelegramApiService(),
+            )
+            botRepo.migrateLegacyBot()
+        }
 
         // Ensure encryption is enabled by default in DB
         appScope.launch {

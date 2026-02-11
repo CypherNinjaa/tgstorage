@@ -16,7 +16,7 @@ import androidx.room.PrimaryKey
             onDelete = ForeignKey.CASCADE,
         )
     ],
-    indices = [Index(value = ["file_id"])],
+    indices = [Index(value = ["file_id"]), Index(value = ["bot_id"])],
 )
 data class ChunkEntity(
     @PrimaryKey(autoGenerate = true)
@@ -39,4 +39,11 @@ data class ChunkEntity(
 
     @ColumnInfo(name = "size")
     val size: Long = 0,
+
+    /**
+     * ID of the bot that uploaded this chunk (for multi-bot support).
+     * NULL for chunks uploaded before multi-bot feature.
+     */
+    @ColumnInfo(name = "bot_id")
+    val botId: Long? = null,
 )

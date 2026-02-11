@@ -25,6 +25,7 @@ sealed class Screen(val route: String) {
     data object SyncDashboard : Screen("sync_dashboard")
     data object BackupRestore : Screen("backup_restore")
     data object Settings : Screen("settings")
+    data object BotSettings : Screen("bot_settings")
     data object Security : Screen("security")
     data object StorageStats : Screen("storage_stats")
     data object About : Screen("about")
