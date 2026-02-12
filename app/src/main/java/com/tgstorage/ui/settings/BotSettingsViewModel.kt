@@ -7,6 +7,7 @@ import com.tgstorage.TgStorageApp
 import com.tgstorage.data.local.entity.BotEntity
 import com.tgstorage.data.remote.TelegramApiService
 import com.tgstorage.data.repository.BotRepository
+import com.tgstorage.data.sync.BackupManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -194,6 +195,9 @@ class BotSettingsViewModel(
                 // Mark as verified since we just tested it
                 botRepository.verifyBot(botId)
 
+                // Trigger backup so the new bot is saved in the latest backup
+                triggerBackupAfterBotChange()
+
                 _uiState.update { 
                     it.copy(
                         showAddDialog = false,
@@ -243,6 +247,8 @@ class BotSettingsViewModel(
             try {
                 botRepository.deleteBot(botId)
                 _uiState.update { it.copy(message = "Bot deleted") }
+                // Trigger backup so the deletion is reflected in the latest backup
+                triggerBackupAfterBotChange()
             } catch (e: Exception) {
                 _uiState.update { it.copy(error = e.message) }
             }
@@ -258,5 +264,21 @@ class BotSettingsViewModel(
 
     fun clearMessage() {
         _uiState.update { it.copy(message = null, error = null) }
+    }
+
+    /**
+     * Trigger a backup after bot configuration changes so the bots table
+     * is always captured in the latest backup.
+     */
+    private fun triggerBackupAfterBotChange() {
+        viewModelScope.launch {
+            try {
+                val backupManager = BackupManager(TgStorageApp.instance)
+                backupManager.createAndUploadBackup()
+                android.util.Log.i("BotSettingsVM", "Backup triggered after bot change")
+            } catch (e: Exception) {
+                android.util.Log.w("BotSettingsVM", "Backup after bot change failed: ${e.message}")
+            }
+        }
     }
 }

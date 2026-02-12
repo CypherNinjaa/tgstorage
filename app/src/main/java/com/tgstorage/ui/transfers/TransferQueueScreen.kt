@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Error
@@ -224,7 +225,9 @@ fun TransferQueueScreen(
                     isLoading = state.isLoadingUploaded,
                     hasMore = state.hasMorePages,
                     downloadingIds = state.downloadingIds,
+                    deletingIds = state.deletingIds,
                     onDownload = viewModel::enqueueDownload,
+                    onDelete = viewModel::confirmDeleteFile,
                     searchQuery = state.uploadedSearchQuery,
                     onSearchChange = viewModel::onUploadedSearchChange,
                     filter = state.uploadedFilter,
@@ -241,6 +244,7 @@ fun TransferQueueScreen(
                     onSelectAll = viewModel::selectAllFiles,
                     onDeselectAll = viewModel::deselectAllFiles,
                     onDownloadSelected = viewModel::downloadSelected,
+                    onDeleteSelected = viewModel::confirmDeleteSelected,
                     onExitSelection = viewModel::exitSelectionMode,
                     // Preview
                     onPreview = viewModel::previewFile,
@@ -286,6 +290,65 @@ fun TransferQueueScreen(
             onDownload = {
                 state.previewFile?.let { viewModel.enqueueDownload(it) }
                 viewModel.dismissPreview()
+            },
+        )
+    }
+
+    // ── Delete Confirmation Dialog ───────────────────
+    if (state.deleteConfirmFile != null) {
+        AlertDialog(
+            onDismissRequest = viewModel::dismissDeleteConfirm,
+            icon = { Icon(Icons.Filled.DeleteForever, null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("Delete from Telegram?") },
+            text = {
+                Text(
+                    "\"${state.deleteConfirmFile!!.name}\" will be permanently deleted " +
+                    "from the Telegram channel. This cannot be undone."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.deleteFileFromTelegram(state.deleteConfirmFile!!.id) },
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissDeleteConfirm) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    if (state.deleteConfirmBulk) {
+        AlertDialog(
+            onDismissRequest = viewModel::dismissDeleteConfirm,
+            icon = { Icon(Icons.Filled.DeleteForever, null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("Delete ${state.selectedFileIds.size} files?") },
+            text = {
+                Text(
+                    "All selected files will be permanently deleted from the " +
+                    "Telegram channel. This cannot be undone."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = viewModel::deleteSelectedFromTelegram,
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) {
+                    Text("Delete all")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissDeleteConfirm) {
+                    Text("Cancel")
+                }
             },
         )
     }
@@ -619,7 +682,9 @@ private fun UploadedTab(
     isLoading: Boolean,
     hasMore: Boolean,
     downloadingIds: Set<Long>,
+    deletingIds: Set<Long>,
     onDownload: (UploadedFileInfo) -> Unit,
+    onDelete: (UploadedFileInfo) -> Unit,
     searchQuery: String,
     onSearchChange: (String) -> Unit,
     filter: TransferFileFilter,
@@ -636,6 +701,7 @@ private fun UploadedTab(
     onSelectAll: () -> Unit,
     onDeselectAll: () -> Unit,
     onDownloadSelected: () -> Unit,
+    onDeleteSelected: () -> Unit,
     onExitSelection: () -> Unit,
     // Preview
     onPreview: (UploadedFileInfo) -> Unit,
@@ -643,38 +709,66 @@ private fun UploadedTab(
     Column(Modifier.fillMaxSize()) {
         // ── Selection bar ─────────────────────────────
         if (isSelectionMode) {
-            Row(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.primaryContainer)
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
             ) {
-                IconButton(onClick = onExitSelection) {
-                    Icon(Icons.Filled.Close, "Exit selection")
-                }
-                Text(
-                    "${selectedFileIds.size} selected",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(
-                    onClick = {
-                        if (selectedFileIds.size == files.size) onDeselectAll() else onSelectAll()
-                    },
+                // Row 1: close, count, select/deselect all
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(Icons.Filled.SelectAll, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text(if (selectedFileIds.size == files.size) "Deselect all" else "Select all")
+                    IconButton(onClick = onExitSelection, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Filled.Close, "Exit selection", modifier = Modifier.size(20.dp))
+                    }
+                    Text(
+                        "${selectedFileIds.size} selected",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f).padding(start = 4.dp),
+                    )
+                    TextButton(
+                        onClick = {
+                            if (selectedFileIds.size == files.size) onDeselectAll() else onSelectAll()
+                        },
+                    ) {
+                        Icon(Icons.Filled.SelectAll, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            if (selectedFileIds.size == files.size) "Deselect all" else "Select all",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
                 }
-                Button(
-                    onClick = onDownloadSelected,
-                    enabled = selectedFileIds.isNotEmpty(),
+                // Row 2: action buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(Icons.Filled.Download, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Download (${selectedFileIds.size})")
+                    Button(
+                        onClick = onDownloadSelected,
+                        enabled = selectedFileIds.isNotEmpty(),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(Icons.Filled.Download, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Download (${selectedFileIds.size})")
+                    }
+                    Button(
+                        onClick = onDeleteSelected,
+                        enabled = selectedFileIds.isNotEmpty(),
+                        modifier = Modifier.weight(1f),
+                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                        ),
+                    ) {
+                        Icon(Icons.Filled.DeleteForever, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Delete (${selectedFileIds.size})")
+                    }
                 }
             }
         }
@@ -740,9 +834,11 @@ private fun UploadedTab(
                                 UploadedFileCard(
                                     file = file,
                                     isDownloading = file.id in downloadingIds,
+                                    isDeleting = file.id in deletingIds,
                                     isSelectionMode = isSelectionMode,
                                     isSelected = file.id in selectedFileIds,
                                     onDownload = { onDownload(file) },
+                                    onDelete = { onDelete(file) },
                                     onLongPress = { onLongPress(file.id) },
                                     onClick = {
                                         if (isSelectionMode) onToggleSelection(file.id)
@@ -779,9 +875,11 @@ private fun UploadedTab(
                             UploadedFileGridItem(
                                 file = file,
                                 isDownloading = file.id in downloadingIds,
+                                isDeleting = file.id in deletingIds,
                                 isSelectionMode = isSelectionMode,
                                 isSelected = file.id in selectedFileIds,
                                 onDownload = { onDownload(file) },
+                                onDelete = { onDelete(file) },
                                 onLongPress = { onLongPress(file.id) },
                                 onClick = {
                                     if (isSelectionMode) onToggleSelection(file.id)
@@ -817,9 +915,11 @@ private fun UploadedTab(
 private fun UploadedFileCard(
     file: UploadedFileInfo,
     isDownloading: Boolean,
+    isDeleting: Boolean,
     isSelectionMode: Boolean,
     isSelected: Boolean,
     onDownload: () -> Unit,
+    onDelete: () -> Unit,
     onLongPress: () -> Unit,
     onClick: () -> Unit,
     onPreview: () -> Unit,
@@ -909,8 +1009,13 @@ private fun UploadedFileCard(
             }
             // Action buttons (hidden during selection mode)
             if (!isSelectionMode) {
-                // Download button or loading indicator
-                if (isDownloading) {
+                if (isDeleting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                } else if (isDownloading) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(24.dp),
                         strokeWidth = 2.dp,
@@ -919,6 +1024,10 @@ private fun UploadedFileCard(
                     IconButton(onClick = onDownload) {
                         Icon(Icons.Filled.Download, "Download",
                             tint = MaterialTheme.colorScheme.primary)
+                    }
+                    IconButton(onClick = onDelete) {
+                        Icon(Icons.Filled.DeleteForever, "Delete from Telegram",
+                            tint = MaterialTheme.colorScheme.error)
                     }
                 }
             }
@@ -931,9 +1040,11 @@ private fun UploadedFileCard(
 private fun UploadedFileGridItem(
     file: UploadedFileInfo,
     isDownloading: Boolean,
+    isDeleting: Boolean,
     isSelectionMode: Boolean,
     isSelected: Boolean,
     onDownload: () -> Unit,
+    onDelete: () -> Unit,
     onLongPress: () -> Unit,
     onClick: () -> Unit,
     onPreview: () -> Unit,
@@ -1027,11 +1138,23 @@ private fun UploadedFileGridItem(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f),
                 )
-                if (!isSelectionMode && !isDownloading) {
+                if (!isSelectionMode && !isDownloading && !isDeleting) {
                     IconButton(onClick = onDownload, modifier = Modifier.size(28.dp)) {
                         Icon(Icons.Filled.Download, "Download",
                             tint = MaterialTheme.colorScheme.primary)
                     }
+                    IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Filled.DeleteForever, "Delete",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(18.dp))
+                    }
+                }
+                if (isDeleting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
             }
         }

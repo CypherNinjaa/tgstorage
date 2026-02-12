@@ -47,6 +47,7 @@ data class TransfersUiState(
     val selectedTab: Int = 0,
     val downloadingIds: Set<Long> = emptySet(),
     val retryingIds: Set<Long> = emptySet(),
+    val deletingIds: Set<Long> = emptySet(),
     val transferSearchQuery: String = "",
     val uploadedSearchQuery: String = "",
     val transferFilter: TransferFileFilter = TransferFileFilter.ALL,
@@ -61,6 +62,10 @@ data class TransfersUiState(
     val previewFile: UploadedFileInfo? = null,
     val previewUrl: String? = null,
     val isLoadingPreview: Boolean = false,
+
+    // ── Delete confirmation ──
+    val deleteConfirmFile: UploadedFileInfo? = null,
+    val deleteConfirmBulk: Boolean = false,
 
     // Sync stats (merged from SyncDashboard)
     val syncPendingCount: Int = 0,
@@ -394,6 +399,78 @@ class TransferQueueViewModel(
         // Exit selection mode and switch to transfers tab
         _uiState.update {
             it.copy(isSelectionMode = false, selectedFileIds = emptySet(), selectedTab = 0)
+        }
+    }
+
+    // ── Delete from Telegram ───────────────────────────
+
+    /**
+     * Show delete confirmation for a single file.
+     */
+    fun confirmDeleteFile(file: UploadedFileInfo) {
+        _uiState.update { it.copy(deleteConfirmFile = file, deleteConfirmBulk = false) }
+    }
+
+    /**
+     * Show delete confirmation for all selected files (bulk).
+     */
+    fun confirmDeleteSelected() {
+        _uiState.update { it.copy(deleteConfirmBulk = true, deleteConfirmFile = null) }
+    }
+
+    /**
+     * Dismiss delete confirmation dialog.
+     */
+    fun dismissDeleteConfirm() {
+        _uiState.update { it.copy(deleteConfirmFile = null, deleteConfirmBulk = false) }
+    }
+
+    /**
+     * Execute delete for a single file — removes all chunk messages from
+     * Telegram channel, then cleans up local DB records.
+     */
+    fun deleteFileFromTelegram(fileId: Long) {
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    deletingIds = it.deletingIds + fileId,
+                    deleteConfirmFile = null,
+                )
+            }
+
+            val result = TransferManager.deleteFromTelegram(fileId)
+
+            _uiState.update { it.copy(deletingIds = it.deletingIds - fileId) }
+
+            if (result.isSuccess) {
+                // Refresh the uploaded list
+                refreshUploaded()
+            }
+        }
+    }
+
+    /**
+     * Delete all currently selected files from Telegram.
+     */
+    fun deleteSelectedFromTelegram() {
+        val selectedIds = _uiState.value.selectedFileIds.toList()
+        if (selectedIds.isEmpty()) return
+
+        _uiState.update {
+            it.copy(
+                deleteConfirmBulk = false,
+                isSelectionMode = false,
+                selectedFileIds = emptySet(),
+                deletingIds = it.deletingIds + selectedIds,
+            )
+        }
+
+        viewModelScope.launch {
+            for (fileId in selectedIds) {
+                TransferManager.deleteFromTelegram(fileId)
+                _uiState.update { it.copy(deletingIds = it.deletingIds - fileId) }
+            }
+            refreshUploaded()
         }
     }
 

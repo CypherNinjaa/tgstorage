@@ -62,8 +62,8 @@ class MultiBotUploadManager(
         private const val MAX_RETRIES = 3
         private const val INITIAL_BACKOFF_MS = 1000L
         
-        // Per-bot concurrency limit — 1 file/chunk at a time per bot to avoid flooding
-        private const val MAX_CONCURRENT_PER_BOT = 1
+        // Per-bot concurrency limit (Telegram rate limit is ~30 req/sec per bot)
+        private const val MAX_CONCURRENT_PER_BOT = 2
         
         // Telegram download limit via getFile API
         private const val TELEGRAM_DOWNLOAD_LIMIT = 20L * 1024 * 1024 // 20 MB
@@ -215,7 +215,6 @@ class MultiBotUploadManager(
                             chunkIndex = 0,
                             telegramMessageId = message.messageId,
                             telegramFileId = message.document?.fileId,
-                            telegramFileUniqueId = message.document?.fileUniqueId,
                             checksum = checksum,
                             size = fileSize,
                             botId = bot.id,
@@ -399,7 +398,6 @@ class MultiBotUploadManager(
                         chunkIndex = chunkIndex,
                         telegramMessageId = message.messageId,
                         telegramFileId = message.document?.fileId,
-                        telegramFileUniqueId = message.document?.fileUniqueId,
                         checksum = chunkChecksum,
                         size = thisChunkSize.toLong(),
                         botId = bot.id,
@@ -454,13 +452,9 @@ class MultiBotUploadManager(
             )
 
             if (chunks.size == 1) {
-                // Single chunk: use the bot that uploaded it, fall back to first
-                val chunk = chunks.first()
-                val uploadingBotPair = chunk.botId?.let { bid ->
-                    activeBots.find { it.first.id == bid }
-                }
-                val (bot, token) = uploadingBotPair ?: activeBots.first()
-                downloadSingleChunk(bot, token, chunk, outputFile, decrypt, progressFlow, totalBytes)
+                // Single chunk: use any bot
+                val (bot, token) = activeBots.first()
+                downloadSingleChunk(bot, token, chunks.first(), outputFile, decrypt, progressFlow, totalBytes)
             } else {
                 // Multiple chunks: download in parallel across bots
                 downloadChunksWithBots(activeBots, chunks, outputFile, decrypt, progressFlow, totalBytes)
@@ -502,16 +496,6 @@ class MultiBotUploadManager(
             val chunks = chunkDao.getChunksForFileSync(fileId)
             if (chunks.isEmpty()) {
                 throw IllegalStateException("No chunks found for file $fileId")
-            }
-
-            // Check for oversized chunks (uploaded before fix)
-            val oversizedChunks = chunks.filter { it.size > TELEGRAM_DOWNLOAD_LIMIT }
-            if (oversizedChunks.isNotEmpty()) {
-                val sizeInMB = oversizedChunks.first().size / (1024 * 1024)
-                throw IllegalStateException(
-                    "This file (${sizeInMB}MB) exceeds Telegram's 20MB download limit. " +
-                    "Please delete and re-upload."
-                )
             }
 
             val totalBytes = chunks.sumOf { it.size }
@@ -688,15 +672,10 @@ class MultiBotUploadManager(
         tempDir.mkdirs()
 
         try {
-            // BOT-AWARE ROUTING: each chunk → its uploading bot.
-            // Fall back to round-robin only for legacy chunks without bot_id.
-            var rrIndex = 0
-            val chunkAssignments = sortedChunks.map { chunk ->
-                val uploadingBotPair = chunk.botId?.let { bid ->
-                    bots.find { it.first.id == bid }
-                }
-                val (bot, token) = uploadingBotPair ?: bots[rrIndex++ % bots.size]
-                Triple(chunk, bot, token)
+            // Assign chunks to bots in round-robin
+            val chunkAssignments = sortedChunks.mapIndexed { idx, chunk ->
+                val botIndex = idx % bots.size
+                Triple(chunk, bots[botIndex].first, bots[botIndex].second)
             }.groupBy { it.second.id }
 
             // Download chunks in parallel - each bot downloads its assigned chunks

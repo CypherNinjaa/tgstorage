@@ -288,6 +288,54 @@ class BackupManager(
                     "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                     arrayOf(MetadataKeys.ONBOARDING_COMPLETED, "true"),
                 )
+
+                // Re-encrypt the primary bot in the bots table with the current
+                // device's Keystore so it can be decrypted after restore.
+                // Other bots are cleared — user must re-add them since their
+                // tokens were encrypted with the old device's Keystore.
+                try {
+                    // Check if bots table exists in the restored DB
+                    val cursor = sqliteDb.rawQuery(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='bots'",
+                        null,
+                    )
+                    val botsTableExists = cursor.use { it.moveToFirst() }
+
+                    if (botsTableExists) {
+                        // Delete all non-primary bots (their tokens can't be decrypted)
+                        sqliteDb.execSQL("DELETE FROM bots WHERE is_primary = 0")
+
+                        // Update the primary bot with re-encrypted token and current chatId
+                        sqliteDb.execSQL(
+                            "UPDATE bots SET token_encrypted = ?, chat_id = ?, " +
+                                    "is_verified = 1, verified_at = ? WHERE is_primary = 1",
+                            arrayOf(encryptedToken, chatId, System.currentTimeMillis()),
+                        )
+
+                        // If no primary bot existed, insert one
+                        val primaryCursor = sqliteDb.rawQuery(
+                            "SELECT COUNT(*) FROM bots WHERE is_primary = 1", null,
+                        )
+                        val hasPrimary = primaryCursor.use {
+                            it.moveToFirst() && it.getInt(0) > 0
+                        }
+                        if (!hasPrimary) {
+                            sqliteDb.execSQL(
+                                "INSERT INTO bots (name, token_encrypted, chat_id, " +
+                                        "is_active, is_verified, is_primary, created_at, verified_at) " +
+                                        "VALUES (?, ?, ?, 1, 1, 1, ?, ?)",
+                                arrayOf(
+                                    "Primary Bot", encryptedToken, chatId,
+                                    System.currentTimeMillis(), System.currentTimeMillis(),
+                                ),
+                            )
+                        }
+
+                        Log.d(TAG, "Bots table restored: primary bot re-encrypted, others cleared")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not update bots table during restore: ${e.message}")
+                }
             } finally {
                 sqliteDb.close()
             }

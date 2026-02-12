@@ -1,8 +1,10 @@
 package com.tgstorage.data.transfer
 
 import android.net.Uri
+import android.util.Log
 import com.tgstorage.TgStorageApp
 import com.tgstorage.data.local.entity.FileEntity
+import com.tgstorage.data.local.entity.BotEntity
 import com.tgstorage.data.remote.TelegramApiService
 import com.tgstorage.data.remote.TokenValidator
 import com.tgstorage.data.repository.BotRepository
@@ -17,20 +19,28 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.FileOutputStream
 
 /**
  * Singleton that coordinates all active uploads/downloads.
  * Exposes a queue of [TransferProgress] items observable by the UI.
- * 
- * UPLOAD LIMITING: Only 10 uploads run concurrently at a time.
- * When one completes, the next pending upload is automatically started.
- * 
- * MULTI-BOT SUPPORT: When multiple bots are configured, uploads are
- * distributed across bots for faster parallel transfers.
+ *
+ * SMART BATCH UPLOAD (Pentaract-inspired):
+ * ─────────────────────────────────────────
+ * 1. Files are sorted SMALL FIRST — small files upload quickly, freeing bots sooner.
+ * 2. Max concurrent uploads = number of active bots (e.g. 4 bots → max 4 parallel).
+ * 3. Each SMALL file gets exactly 1 bot (file-level parallelism).
+ * 4. Each LARGE file gets ALL bots (chunk-level parallelism across bots).
+ * 5. After each file completes → temp/cache cleanup → take next from queue.
+ * 6. For downloads: each chunk knows which bot uploaded it (bot_id in chunks table).
+ *    We use THAT bot first, then fall back to others.
  */
 object TransferManager {
+
+    private const val TAG = "TransferManager"
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val activeJobs = mutableMapOf<Long, Job>() // fileId → job
@@ -38,28 +48,35 @@ object TransferManager {
     private val _transfers = MutableStateFlow<List<TransferProgress>>(emptyList())
     val transfers: StateFlow<List<TransferProgress>> = _transfers.asStateFlow()
 
-    // Pending files waiting to be uploaded (queue)
-    private val pendingUploadQueue = mutableListOf<FileEntity>()
-    private val queueLock = Any()
+    // ─── Upload Queue (sorted small-first) ─────────────
+    private val uploadQueue = mutableListOf<FileEntity>()
+    private val queueMutex = Mutex()
 
-    // Maximum concurrent uploads (total across all bots)
-    private const val MAX_CONCURRENT_UPLOADS = 20
-    
-    // Track bot assignments: botId -> set of fileIds currently being uploaded by that bot
-    private val botFileAssignments = mutableMapOf<Long, MutableSet<Long>>()
-    private val assignmentLock = Any()
-    
-    // Cache of active bots (refreshed periodically)
-    @Volatile private var cachedActiveBots: List<Pair<com.tgstorage.data.local.entity.BotEntity, String>> = emptyList()
-    @Volatile private var lastBotRefresh = 0L
-    private const val BOT_CACHE_TTL = 5000L // 5 seconds
+    // ─── Bot Pool ──────────────────────────────────────
+    @Volatile
+    private var cachedActiveBots: List<Pair<BotEntity, String>> = emptyList()
+    @Volatile
+    private var lastBotRefresh = 0L
+    private const val BOT_CACHE_TTL = 5_000L
+
+    // Track which file each bot is currently handling
+    private val botAssignments = mutableMapOf<Long, MutableSet<Long>>()
+    private val assignmentMutex = Mutex()
+
+    // Prevent overlapping processNextBatch calls
+    private val batchMutex = Mutex()
+
+    // Small file threshold (matches Telegram getFile download limit safety margin)
+    private const val SMALL_FILE_THRESHOLD = 10L * 1024 * 1024 // 10 MB
+
+    // ─── Singletons ────────────────────────────────────
 
     private fun getChunkManager(): ChunkManager {
         val app = TgStorageApp.instance
         val db = app.database
         return ChunkManager(
             context = app,
-            api = com.tgstorage.data.remote.TelegramApiService(),
+            api = TelegramApiService(),
             chunkDao = db.chunkDao(),
             syncStateDao = db.syncStateDao(),
             fileDao = db.fileDao(),
@@ -100,11 +117,8 @@ object TransferManager {
         )
     }
 
-    // ─── Bot Assignment for File Distribution ──────────
+    // ─── Bot Pool Management ───────────────────────────
 
-    /**
-     * Refresh the cached list of active bots.
-     */
     private suspend fun refreshActiveBots() {
         val now = System.currentTimeMillis()
         if (now - lastBotRefresh > BOT_CACHE_TTL || cachedActiveBots.isEmpty()) {
@@ -114,79 +128,56 @@ object TransferManager {
     }
 
     /**
-     * Find the bot with the fewest active file assignments (load balancing).
-     * Returns the bot and token, or null if no bots available.
+     * Max concurrent uploads = number of active bots.
+     * If no multi-bot setup, falls back to 1.
      */
-    private fun getLeastLoadedBot(): Pair<com.tgstorage.data.local.entity.BotEntity, String>? {
+    private fun getMaxConcurrentUploads(): Int =
+        cachedActiveBots.size.coerceAtLeast(1)
+
+    /**
+     * Get the bot with fewest active assignments.
+     */
+    private suspend fun getLeastLoadedBot(): Pair<BotEntity, String>? {
         if (cachedActiveBots.isEmpty()) return null
-        
-        synchronized(assignmentLock) {
-            return cachedActiveBots.minByOrNull { (bot, _) ->
-                botFileAssignments[bot.id]?.size ?: 0
+        return assignmentMutex.withLock {
+            cachedActiveBots.minByOrNull { (bot, _) ->
+                botAssignments[bot.id]?.size ?: 0
             }
         }
     }
 
-    /**
-     * Assign a file to a bot for upload.
-     */
-    private fun assignFileToBot(fileId: Long, botId: Long) {
-        synchronized(assignmentLock) {
-            botFileAssignments.getOrPut(botId) { mutableSetOf() }.add(fileId)
+    private suspend fun assignFileToBot(fileId: Long, botId: Long) {
+        assignmentMutex.withLock {
+            botAssignments.getOrPut(botId) { mutableSetOf() }.add(fileId)
         }
     }
 
-    /**
-     * Remove a file assignment from a bot (when upload completes).
-     */
-    private fun unassignFileFromBot(fileId: Long, botId: Long) {
-        synchronized(assignmentLock) {
-            botFileAssignments[botId]?.remove(fileId)
+    private suspend fun unassignFileFromBot(fileId: Long, botId: Long) {
+        assignmentMutex.withLock {
+            botAssignments[botId]?.remove(fileId)
         }
     }
 
-    /**
-     * Get current upload count for a specific bot.
-     */
-    private fun getBotUploadCount(botId: Long): Int {
-        synchronized(assignmentLock) {
-            return botFileAssignments[botId]?.size ?: 0
-        }
-    }
-
-    // ─── Upload ────────────────────────────────────────
+    // ─── Upload: Enqueue ───────────────────────────────
 
     /**
-     * Count of currently running upload jobs (IN_PROGRESS status)
-     */
-    private fun getActiveUploadCount(): Int {
-        return _transfers.value.count { 
-            it.type == TransferType.UPLOAD && it.status == TransferStatus.IN_PROGRESS 
-        }
-    }
-
-    /**
-     * Enqueue a file for upload. If we're already at max concurrent uploads,
-     * the file is added to a pending queue and will start automatically 
-     * when another upload completes.
+     * Add a file to the upload queue. Files are sorted by size (small first).
+     * The batch processor picks it up automatically.
      */
     fun enqueueUpload(file: FileEntity) {
-        if (activeJobs.containsKey(file.id)) return // already in queue
-        
-        // Check if already in pending queue
-        synchronized(queueLock) {
-            if (pendingUploadQueue.any { it.id == file.id }) return
-        }
+        if (activeJobs.containsKey(file.id)) return
 
-        // Check if we're at the concurrent upload limit
-        if (getActiveUploadCount() >= MAX_CONCURRENT_UPLOADS) {
-            // Add to pending queue instead of starting immediately
-            synchronized(queueLock) {
-                if (!pendingUploadQueue.any { it.id == file.id }) {
-                    pendingUploadQueue.add(file)
-                }
+        scope.launch {
+            val alreadyQueued = queueMutex.withLock { uploadQueue.any { it.id == file.id } }
+            if (alreadyQueued) return@launch
+
+            // Add to queue, sorted ascending by size (small first)
+            queueMutex.withLock {
+                uploadQueue.add(file)
+                uploadQueue.sortBy { it.size }
             }
-            // Add to transfer list as PENDING (queued)
+
+            // Show PENDING in transfer list
             _transfers.update { current ->
                 if (current.none { it.fileId == file.id && it.type == TransferType.UPLOAD }) {
                     current + TransferProgress(
@@ -199,19 +190,53 @@ object TransferManager {
                     )
                 } else current
             }
-            return
-        }
 
-        // Start the upload immediately
-        startUploadJob(file)
+            // Trigger batch processing
+            processNextBatch()
+        }
     }
 
+    // ─── Upload: Batch Processor ───────────────────────
+
     /**
-     * Actually start an upload job for a file.
-     * Files are distributed across bots:
-     * - Small files: assigned to least-loaded bot for file-level parallelism
-     * - Large files: chunks distributed across all bots for chunk-level parallelism
+     * Takes up to N files (N = bot count) from the queue and starts uploads.
+     * Each small file → 1 bot. Large files → all bots for chunks.
+     * Automatically triggered when any upload completes.
      */
+    private fun processNextBatch() {
+        scope.launch {
+            batchMutex.withLock {
+                refreshActiveBots()
+                val maxConcurrent = getMaxConcurrentUploads()
+
+                val activeCount = _transfers.value.count {
+                    it.type == TransferType.UPLOAD && it.status == TransferStatus.IN_PROGRESS
+                }
+                val availableSlots = (maxConcurrent - activeCount).coerceAtLeast(0)
+                if (availableSlots == 0) return@withLock
+
+                val filesToStart = queueMutex.withLock {
+                    val count = minOf(availableSlots, uploadQueue.size)
+                    if (count == 0) return@withLock emptyList()
+                    val batch = uploadQueue.take(count)
+                    repeat(count) { uploadQueue.removeAt(0) }
+                    batch
+                }
+
+                if (filesToStart.isEmpty()) return@withLock
+
+                Log.i(TAG, "Batch: starting ${filesToStart.size} files " +
+                        "(${cachedActiveBots.size} bots, ${availableSlots} slots)")
+
+                for (file in filesToStart) {
+                    startUploadJob(file)
+                }
+            }
+        }
+    }
+
+    // ─── Upload: Single File Job ───────────────────────
+
     private fun startUploadJob(file: FileEntity) {
         if (activeJobs.containsKey(file.id)) return
 
@@ -226,77 +251,69 @@ object TransferManager {
             )
         )
 
-        // Add or update transfer list entry
         _transfers.update { current ->
             val existing = current.find { it.fileId == file.id && it.type == TransferType.UPLOAD }
             if (existing != null) {
-                current.map { if (it.fileId == file.id && it.type == TransferType.UPLOAD) progressFlow.value else it }
+                current.map {
+                    if (it.fileId == file.id && it.type == TransferType.UPLOAD) progressFlow.value
+                    else it
+                }
             } else {
                 current + progressFlow.value
             }
         }
 
-        // Track which bot this file is assigned to (for cleanup)
         var assignedBotId: Long? = null
 
-        // Observe individual progress and update the list
         val job = scope.launch {
-            launch {
+            // Collect progress — save job so we can cancel it when upload finishes
+            val collector = launch {
                 progressFlow.collect { progress ->
                     _transfers.update { list ->
-                        list.map { if (it.fileId == file.id && it.type == TransferType.UPLOAD) progress else it }
+                        list.map {
+                            if (it.fileId == file.id && it.type == TransferType.UPLOAD) progress
+                            else it
+                        }
                     }
                 }
-            }
-
-            // Refresh active bots and get assignment
-            refreshActiveBots()
-            val activeBots = cachedActiveBots
-
-            // Resolve the file to upload - handle both content:// URIs and file paths
-            val (uploadFile, tempFile) = resolveFileForUpload(file)
-            if (uploadFile == null) {
-                progressFlow.value = progressFlow.value.copy(
-                    status = TransferStatus.FAILED,
-                    error = "Cannot access file - it may have been deleted or moved",
-                )
-                return@launch
             }
 
             try {
-                val fileSize = uploadFile.length()
-                val isLargeFile = fileSize > 10L * 1024 * 1024 // > 10 MB
-                
-                when {
-                    activeBots.size >= 2 && isLargeFile -> {
-                        // Large file with multiple bots: distribute chunks across ALL bots
-                        getMultiBotUploadManager().uploadFileWithMultipleBots(
-                            file = file,
-                            localFile = uploadFile,
-                            progressFlow = progressFlow,
-                        )
-                    }
-                    activeBots.size >= 2 -> {
-                        // Small file with multiple bots: assign to LEAST LOADED bot (file-level parallelism)
-                        val assignedBot = getLeastLoadedBot()
-                        if (assignedBot != null) {
-                            val (bot, token) = assignedBot
-                            assignedBotId = bot.id
-                            assignFileToBot(file.id, bot.id)
-                            
-                            getMultiBotUploadManager().uploadFileWithSpecificBot(
-                                bot = bot,
-                                token = token,
+                refreshActiveBots()
+                val activeBots = cachedActiveBots
+
+                val (uploadFile, tempFile) = resolveFileForUpload(file)
+                if (uploadFile == null) {
+                    progressFlow.value = progressFlow.value.copy(
+                        status = TransferStatus.FAILED,
+                        error = "Cannot access file - it may have been deleted or moved",
+                    )
+                    return@launch
+                }
+
+                try {
+                    val fileSize = uploadFile.length()
+                    val isLargeFile = fileSize > SMALL_FILE_THRESHOLD
+
+                    when {
+                        // LARGE FILE + multiple bots → distribute chunks across ALL bots
+                        activeBots.size >= 2 && isLargeFile -> {
+                            Log.i(TAG, "Large file (${fileSize / 1024 / 1024}MB) → " +
+                                    "chunks across ${activeBots.size} bots")
+                            getMultiBotUploadManager().uploadFileWithMultipleBots(
                                 file = file,
                                 localFile = uploadFile,
                                 progressFlow = progressFlow,
                             )
-                        } else {
-                            // Fallback to first bot
-                            val (bot, token) = activeBots.first()
+                        }
+                        // SMALL FILE + bots available → assign to 1 least-loaded bot
+                        activeBots.isNotEmpty() -> {
+                            val botPair = getLeastLoadedBot() ?: activeBots.first()
+                            val (bot, token) = botPair
                             assignedBotId = bot.id
                             assignFileToBot(file.id, bot.id)
-                            
+                            Log.i(TAG, "Small file '${file.name}' → bot '${bot.name}'")
+
                             getMultiBotUploadManager().uploadFileWithSpecificBot(
                                 bot = bot,
                                 token = token,
@@ -305,72 +322,59 @@ object TransferManager {
                                 progressFlow = progressFlow,
                             )
                         }
-                    }
-                    activeBots.size == 1 -> {
-                        // Single bot: use it directly
-                        val (bot, token) = activeBots.first()
-                        assignedBotId = bot.id
-                        assignFileToBot(file.id, bot.id)
-                        
-                        getMultiBotUploadManager().uploadFileWithSpecificBot(
-                            bot = bot,
-                            token = token,
-                            file = file,
-                            localFile = uploadFile,
-                            progressFlow = progressFlow,
-                        )
-                    }
-                    else -> {
-                        // No bots from new system, fall back to legacy single-bot
-                        val repo = getTelegramRepository()
-                        val token = repo.getToken()
-                        val chatId = repo.getChatId()
+                        // NO multi-bot → legacy single bot
+                        else -> {
+                            val repo = getTelegramRepository()
+                            val token = repo.getToken()
+                            val chatId = repo.getChatId()
 
-                        if (token == null || chatId == null) {
-                            progressFlow.value = progressFlow.value.copy(
-                                status = TransferStatus.FAILED,
-                                error = "Bot token or channel not configured",
-                            )
-                            return@launch
-                        }
-
-                        // Validate token before upload
-                        val db = TgStorageApp.instance.database
-                        val tokenValid = TokenValidator.validateToken(
-                            api = TelegramApiService(),
-                            token = token,
-                            metadataDao = db.metadataDao(),
-                        )
-                        if (!tokenValid) {
-                            val errorMsg = when (TokenValidator.tokenStatus.value) {
-                                is TokenValidator.TokenStatus.Revoked ->
-                                    "Bot token has been revoked. Please update it in Settings."
-                                is TokenValidator.TokenStatus.RateLimited ->
-                                    "Telegram rate limit reached. Please try again later."
-                                is TokenValidator.TokenStatus.NetworkError ->
-                                    "No internet connection."
-                                else -> "Token validation failed."
+                            if (token == null || chatId == null) {
+                                progressFlow.value = progressFlow.value.copy(
+                                    status = TransferStatus.FAILED,
+                                    error = "Bot token or channel not configured",
+                                )
+                                return@launch
                             }
-                            progressFlow.value = progressFlow.value.copy(
-                                status = TransferStatus.FAILED,
-                                error = errorMsg,
-                            )
-                            return@launch
-                        }
 
-                        getChunkManager().uploadFile(
-                            token = token,
-                            chatId = chatId,
-                            fileId = file.id,
-                            localFile = uploadFile,
-                            fileName = file.name,
-                            progressFlow = progressFlow,
-                        )
+                            val db = TgStorageApp.instance.database
+                            val tokenValid = TokenValidator.validateToken(
+                                api = TelegramApiService(),
+                                token = token,
+                                metadataDao = db.metadataDao(),
+                            )
+                            if (!tokenValid) {
+                                progressFlow.value = progressFlow.value.copy(
+                                    status = TransferStatus.FAILED,
+                                    error = when (TokenValidator.tokenStatus.value) {
+                                        is TokenValidator.TokenStatus.Revoked ->
+                                            "Bot token revoked. Update in Settings."
+                                        is TokenValidator.TokenStatus.RateLimited ->
+                                            "Rate limited. Try again later."
+                                        is TokenValidator.TokenStatus.NetworkError ->
+                                            "No internet connection."
+                                        else -> "Token validation failed."
+                                    },
+                                )
+                                return@launch
+                            }
+
+                            getChunkManager().uploadFile(
+                                token = token,
+                                chatId = chatId,
+                                fileId = file.id,
+                                localFile = uploadFile,
+                                fileName = file.name,
+                                progressFlow = progressFlow,
+                            )
+                        }
                     }
+                } finally {
+                    // CRITICAL: always clean up temp file
+                    tempFile?.delete()
                 }
             } finally {
-                // CRITICAL: Always clean up temp file after upload (success or failure)
-                tempFile?.delete()
+                // Cancel the infinite progress collector so this job can complete
+                collector.cancel()
             }
         }
 
@@ -378,139 +382,130 @@ object TransferManager {
 
         job.invokeOnCompletion {
             activeJobs.remove(file.id)
-            
-            // Unassign file from bot
+
+            // Unassign bot
             assignedBotId?.let { botId ->
-                unassignFileFromBot(file.id, botId)
+                scope.launch { unassignFileFromBot(file.id, botId) }
             }
-            
-            // When an upload completes, start MULTIPLE pending uploads (one per available bot slot)
-            processNextPendingUploads()
-            
-            // Auto-remove completed uploads after brief delay to free memory
+
+            // Clean cache for this file
+            cleanUploadCache(file.id)
+
+            // Trigger next batch
+            processNextBatch()
+
+            // Auto-remove completed, trigger backup
             val finalStatus = progressFlow.value.status
             if (finalStatus == TransferStatus.COMPLETED) {
-                // Trigger auto-backup check after successful upload
                 scope.launch { checkAutoBackupAfterUpload() }
-
                 scope.launch {
-                    delay(2000) // Let user see "Done" status briefly
+                    delay(2000)
                     removeTransfer(file.id, TransferType.UPLOAD)
                 }
             }
         }
     }
-    
+
+    // ─── Cache Cleanup ─────────────────────────────────
+
     /**
-     * Remove a single transfer from the list (used for auto-cleanup of completed uploads)
+     * Clean temp/cache for a specific file upload.
+     * Called after each file completes (success or failure).
      */
-    private fun removeTransfer(fileId: Long, type: TransferType) {
-        _transfers.update { list ->
-            list.filter { !(it.fileId == fileId && it.type == type) }
+    private fun cleanUploadCache(fileId: Long) {
+        val app = TgStorageApp.instance
+
+        // Upload temp copy
+        val uploadTemp = File(app.cacheDir, "upload_temp")
+        if (uploadTemp.exists()) {
+            uploadTemp.listFiles()
+                ?.filter { it.name.startsWith("${fileId}_") }
+                ?.forEach { it.delete() }
         }
+
+        // Multibot chunk temps
+        File(app.cacheDir, "multibot_chunks_$fileId").let {
+            if (it.exists()) it.deleteRecursively()
+        }
+
+        // Legacy chunk temps
+        File(app.cacheDir, "chunks_$fileId").let {
+            if (it.exists()) it.deleteRecursively()
+        }
+
+        // Encryption temps
+        app.cacheDir.listFiles()?.filter {
+            it.name.startsWith("enc_${fileId}_") ||
+                    it.name.startsWith("encrypt_${fileId}_")
+        }?.forEach { it.delete() }
+
+        Log.d(TAG, "Cleaned cache for file $fileId")
     }
-    
+
     /**
-     * Resolves a FileEntity's localUri to an actual File for upload.
-     * - If it's a file path and exists, returns it directly (no temp file)
-     * - If it's a content:// URI, creates a temp copy and returns it
-     * 
-     * @return Pair of (fileToUpload, tempFileToDelete) - tempFile is null if no cleanup needed
+     * Global cache cleanup.
      */
+    fun cleanAllUploadCache() {
+        val app = TgStorageApp.instance
+        val cacheDir = app.cacheDir
+
+        File(cacheDir, "upload_temp").deleteRecursively()
+
+        cacheDir.listFiles()?.filter {
+            it.isDirectory && (it.name.startsWith("multibot_chunks_") ||
+                    it.name.startsWith("chunks_") ||
+                    it.name.startsWith("multibot_download_"))
+        }?.forEach { it.deleteRecursively() }
+
+        cacheDir.listFiles()?.filter {
+            it.name.startsWith("enc_") || it.name.startsWith("encrypt_")
+        }?.forEach { it.delete() }
+
+        Log.i(TAG, "Cleaned all upload cache")
+    }
+
+    // ─── Transfer List Management ──────────────────────
+
+    private fun removeTransfer(fileId: Long, type: TransferType) {
+        _transfers.update { list -> list.filter { !(it.fileId == fileId && it.type == type) } }
+    }
+
+    // ─── File Resolution ───────────────────────────────
+
     private fun resolveFileForUpload(file: FileEntity): Pair<File?, File?> {
         val uriString = file.localUri ?: return Pair(null, null)
-        
-        // Check if it's a direct file path (not a content:// URI)
+
         if (!uriString.startsWith("content://")) {
             val directFile = File(uriString)
             return if (directFile.exists()) Pair(directFile, null) else Pair(null, null)
         }
-        
-        // It's a content:// URI - create a temp copy
+
         val app = TgStorageApp.instance
         val uri = Uri.parse(uriString)
-        
         val tempDir = File(app.cacheDir, "upload_temp")
         if (!tempDir.exists()) tempDir.mkdirs()
-        
         val tempFile = File(tempDir, "${file.id}_${System.currentTimeMillis()}_${file.name}")
-        
+
         return try {
             app.contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(tempFile).use { output ->
-                    input.copyTo(output, bufferSize = 8192)
-                }
+                FileOutputStream(tempFile).use { output -> input.copyTo(output, bufferSize = 8192) }
             }
-            if (tempFile.exists() && tempFile.length() > 0) {
-                Pair(tempFile, tempFile)
-            } else {
-                tempFile.delete()
-                Pair(null, null)
-            }
+            if (tempFile.exists() && tempFile.length() > 0) Pair(tempFile, tempFile)
+            else { tempFile.delete(); Pair(null, null) }
         } catch (e: Exception) {
             tempFile.delete()
             Pair(null, null)
         }
     }
 
-    /**
-     * Process multiple pending uploads from the queue.
-     * Starts one file per available bot slot for maximum parallelism.
-     */
-    private fun processNextPendingUploads() {
-        // Calculate how many slots are available
-        val availableSlots = MAX_CONCURRENT_UPLOADS - getActiveUploadCount()
-        if (availableSlots <= 0) return
-        
-        // Get files to start (up to available slots)
-        val filesToStart: List<FileEntity> = synchronized(queueLock) {
-            val count = minOf(availableSlots, pendingUploadQueue.size)
-            if (count == 0) return@synchronized emptyList()
-            
-            val files = pendingUploadQueue.take(count)
-            repeat(count) { pendingUploadQueue.removeAt(0) }
-            files
-        }
-        
-        // Start all files in parallel
-        filesToStart.forEach { file ->
-            scope.launch {
-                startUploadJob(file)
-            }
-        }
-    }
-
     // ─── Download ──────────────────────────────────────
 
-    // Track bot assignments for downloads (file-level distribution)
-    private val downloadBotAssignments = mutableMapOf<Long, MutableSet<Long>>()
-    private val downloadAssignmentLock = Any()
-
-    private fun assignDownloadToBot(fileId: Long, botId: Long) {
-        synchronized(downloadAssignmentLock) {
-            downloadBotAssignments.getOrPut(botId) { mutableSetOf() }.add(fileId)
-        }
-    }
-
-    private fun unassignDownloadFromBot(fileId: Long, botId: Long) {
-        synchronized(downloadAssignmentLock) {
-            downloadBotAssignments[botId]?.remove(fileId)
-        }
-    }
-
-    private fun getLeastLoadedBotForDownload(): Pair<com.tgstorage.data.local.entity.BotEntity, String>? {
-        val bots = cachedActiveBots
-        if (bots.isEmpty()) return null
-        
-        synchronized(downloadAssignmentLock) {
-            return bots.minByOrNull { (bot, _) ->
-                downloadBotAssignments[bot.id]?.size ?: 0
-            }
-        }
-    }
-
+    /**
+     * Download uses the bot that UPLOADED each chunk (bot_id in chunks table).
+     * Falls back to round-robin only for legacy uploads without bot_id.
+     */
     fun enqueueDownload(file: FileEntity, outputFile: File) {
-        val downloadKey = -file.id // negative key to distinguish from upload
+        val downloadKey = -file.id
         if (activeJobs.containsKey(downloadKey)) return
 
         val progressFlow = MutableStateFlow(
@@ -523,64 +518,45 @@ object TransferManager {
                 status = TransferStatus.PENDING,
             )
         )
-
         _transfers.update { current -> current + progressFlow.value }
 
-        // Track which bot this download is assigned to
-        var assignedBotId: Long? = null
-
         val job = scope.launch {
-            launch {
+            val collector = launch {
                 progressFlow.collect { progress ->
                     _transfers.update { list ->
                         list.map {
-                            if (it.fileId == file.id && it.type == TransferType.DOWNLOAD) progress else it
+                            if (it.fileId == file.id && it.type == TransferType.DOWNLOAD) progress
+                            else it
                         }
                     }
                 }
             }
 
-            // Refresh bot cache and check for multi-bot config
-            refreshActiveBots()
-            val activeBots = cachedActiveBots
+            try {
+                refreshActiveBots()
+                val activeBots = cachedActiveBots
+                val db = TgStorageApp.instance.database
+                val chunks = db.chunkDao().getChunksForFileSync(file.id)
+                val hasMultipleChunks = chunks.size > 1
 
-            // Get chunks to determine if file has multiple chunks
-            val db = TgStorageApp.instance.database
-            val chunks = db.chunkDao().getChunksForFileSync(file.id)
-            val hasMultipleChunks = chunks.size > 1
-
-            when {
-                activeBots.size >= 2 && hasMultipleChunks -> {
-                    // Multiple chunks + multiple bots: distribute chunks across ALL bots for speed
-                    getMultiBotUploadManager().downloadFileWithMultipleBots(
-                        fileId = file.id,
-                        fileName = file.name,
-                        outputFile = outputFile,
-                        progressFlow = progressFlow,
-                    )
-                }
-                activeBots.size >= 2 -> {
-                    // Single chunk + multiple bots: assign to least-loaded bot (file-level parallelism)
-                    val assignedBot = getLeastLoadedBotForDownload()
-                    if (assignedBot != null) {
-                        val (bot, token) = assignedBot
-                        assignedBotId = bot.id
-                        assignDownloadToBot(file.id, bot.id)
-                        
-                        getMultiBotUploadManager().downloadFileWithSpecificBot(
-                            bot = bot,
-                            token = token,
+                when {
+                    // Multi-chunk + multi-bot → bot-aware parallel download
+                    activeBots.size >= 2 && hasMultipleChunks -> {
+                        getMultiBotUploadManager().downloadFileWithMultipleBots(
                             fileId = file.id,
                             fileName = file.name,
                             outputFile = outputFile,
                             progressFlow = progressFlow,
                         )
-                    } else {
-                        // Fallback to first bot
-                        val (bot, token) = activeBots.first()
-                        assignedBotId = bot.id
-                        assignDownloadToBot(file.id, bot.id)
-                        
+                    }
+                    // Single chunk or single bot → use the uploading bot
+                    activeBots.isNotEmpty() -> {
+                        val uploadingBotId = chunks.firstOrNull()?.botId
+                        val botPair = if (uploadingBotId != null) {
+                            activeBots.find { it.first.id == uploadingBotId }
+                        } else null
+
+                        val (bot, token) = botPair ?: activeBots.first()
                         getMultiBotUploadManager().downloadFileWithSpecificBot(
                             bot = bot,
                             token = token,
@@ -590,110 +566,190 @@ object TransferManager {
                             progressFlow = progressFlow,
                         )
                     }
-                }
-                activeBots.size == 1 -> {
-                    // Single bot from new system
-                    val (bot, token) = activeBots.first()
-                    assignedBotId = bot.id
-                    assignDownloadToBot(file.id, bot.id)
-                    
-                    getMultiBotUploadManager().downloadFileWithSpecificBot(
-                        bot = bot,
-                        token = token,
-                        fileId = file.id,
-                        fileName = file.name,
-                        outputFile = outputFile,
-                        progressFlow = progressFlow,
-                    )
-                }
-                else -> {
-                    // Fallback to legacy single-bot download
-                    val repo = getTelegramRepository()
-                    val token = repo.getToken()
-
-                    if (token == null) {
-                        progressFlow.value = progressFlow.value.copy(
-                            status = TransferStatus.FAILED,
-                            error = "Bot token not configured",
+                    // Legacy single-bot
+                    else -> {
+                        val repo = getTelegramRepository()
+                        val token = repo.getToken()
+                        if (token == null) {
+                            progressFlow.value = progressFlow.value.copy(
+                                status = TransferStatus.FAILED,
+                                error = "Bot token not configured",
+                            )
+                            return@launch
+                        }
+                        getChunkManager().downloadFile(
+                            token = token,
+                            fileId = file.id,
+                            fileName = file.name,
+                            outputFile = outputFile,
+                            progressFlow = progressFlow,
                         )
-                        return@launch
                     }
-
-                    getChunkManager().downloadFile(
-                        token = token,
-                        fileId = file.id,
-                        fileName = file.name,
-                        outputFile = outputFile,
-                        progressFlow = progressFlow,
-                    )
                 }
+            } finally {
+                collector.cancel()
             }
         }
 
         activeJobs[downloadKey] = job
-        job.invokeOnCompletion { 
+        job.invokeOnCompletion {
             activeJobs.remove(downloadKey)
-            
-            // Unassign download from bot
-            assignedBotId?.let { botId ->
-                unassignDownloadFromBot(file.id, botId)
+
+            // Clean download temps
+            val app = TgStorageApp.instance
+            app.cacheDir.listFiles()?.filter {
+                it.name.startsWith("dl_") ||
+                        (it.isDirectory && it.name.startsWith("multibot_download_"))
+            }?.forEach {
+                if (it.isDirectory) it.deleteRecursively() else it.delete()
             }
-            
-            // Auto-remove completed downloads after brief delay to free memory
+
             val finalStatus = progressFlow.value.status
             if (finalStatus == TransferStatus.COMPLETED) {
                 scope.launch {
-                    delay(2000) // Let user see "Done" status briefly
+                    delay(2000)
                     removeTransfer(file.id, TransferType.DOWNLOAD)
                 }
             }
         }
     }
 
-    // ─── Cancel ────────────────────────────────────────
+    // ─── Delete from Telegram ──────────────────────────
+
+    /**
+     * Delete an uploaded file from Telegram by removing all its chunk messages
+     * from the channel, then cleaning up local DB records.
+     *
+     * Each chunk knows which bot uploaded it (bot_id). We use that bot's token
+     * to call deleteMessage. Falls back to primary bot for legacy chunks.
+     *
+     * @return Result.success with number of deleted messages, or failure.
+     */
+    suspend fun deleteFromTelegram(fileId: Long): Result<Int> {
+        return try {
+            val app = TgStorageApp.instance
+            val db = app.database
+            val chunkDao = db.chunkDao()
+            val syncStateDao = db.syncStateDao()
+            val fileDao = db.fileDao()
+            val botRepository = getBotRepository()
+            val api = TelegramApiService()
+
+            val chunks = chunkDao.getChunksForFileSync(fileId)
+            if (chunks.isEmpty()) {
+                // No chunks — just clean up DB
+                syncStateDao.updateStatus(fileId, com.tgstorage.data.local.entity.SyncStatus.DELETED)
+                return Result.success(0)
+            }
+
+            val activeBots = botRepository.getActiveBotsWithTokens()
+            val botTokenMap = activeBots.associate { (bot, token) -> bot.id to token }
+
+            // Get primary token as fallback
+            val metadataDao = db.metadataDao()
+            val primaryToken = metadataDao.getValue(
+                com.tgstorage.data.local.entity.MetadataKeys.BOT_TOKEN
+            )?.let { encToken ->
+                runCatching {
+                    com.tgstorage.common.security.CryptoManager.decrypt(
+                        android.util.Base64.decode(encToken, android.util.Base64.NO_WRAP)
+                    ).decodeToString()
+                }.getOrNull()
+            }
+
+            var deletedCount = 0
+            var lastError: Exception? = null
+
+            for (chunk in chunks) {
+                val messageId = chunk.telegramMessageId ?: continue
+
+                // Find the right token: uploading bot → primary bot → first available
+                val token = chunk.botId?.let { botTokenMap[it] }
+                    ?: primaryToken
+                    ?: activeBots.firstOrNull()?.second
+
+                if (token == null) {
+                    lastError = IllegalStateException("No bot token available to delete chunk")
+                    continue
+                }
+
+                // Get chatId for this bot
+                val chatId = chunk.botId?.let { botId ->
+                    activeBots.find { it.first.id == botId }?.first?.chatId
+                } ?: metadataDao.getValue(com.tgstorage.data.local.entity.MetadataKeys.CHAT_ID)
+                ?: continue
+
+                try {
+                    api.deleteMessage(token, chatId, messageId).getOrThrow()
+                    deletedCount++
+                } catch (e: Exception) {
+                    // Message might already be deleted — continue with others
+                    Log.w(TAG, "Failed to delete message $messageId: ${e.message}")
+                    lastError = e
+                    // Still count as "handled" if message was not found
+                    if (e.message?.contains("message to delete not found", ignoreCase = true) == true ||
+                        e.message?.contains("not found", ignoreCase = true) == true) {
+                        deletedCount++
+                    }
+                }
+            }
+
+            // Clean up DB records
+            chunkDao.deleteChunksForFile(fileId)
+            syncStateDao.updateStatus(fileId, com.tgstorage.data.local.entity.SyncStatus.DELETED)
+
+            // Also delete the file entity and its local file if present
+            val fileEntity = fileDao.getFileById(fileId)
+            if (fileEntity != null) {
+                fileEntity.localUri?.let { path ->
+                    val localFile = File(path)
+                    if (localFile.exists()) localFile.delete()
+                }
+                fileDao.deleteFile(fileEntity)
+            }
+
+            Log.i(TAG, "Deleted file $fileId from Telegram: $deletedCount/${chunks.size} messages removed")
+            Result.success(deletedCount)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to delete file $fileId from Telegram", e)
+            Result.failure(e)
+        }
+    }
+
+    // ─── Cancel / Pause / Resume ───────────────────────
 
     fun cancelTransfer(fileId: Long, type: TransferType) {
         val key = if (type == TransferType.DOWNLOAD) -fileId else fileId
         activeJobs[key]?.cancel()
         activeJobs.remove(key)
-
         _transfers.update { list ->
             list.map {
-                if (it.fileId == fileId && it.type == type) {
-                    it.copy(status = TransferStatus.CANCELLED)
-                } else it
+                if (it.fileId == fileId && it.type == type) it.copy(status = TransferStatus.CANCELLED)
+                else it
             }
         }
     }
-
-    // ─── Pause ─────────────────────────────────────────
 
     fun pauseTransfer(fileId: Long, type: TransferType) {
         val key = if (type == TransferType.DOWNLOAD) -fileId else fileId
         activeJobs[key]?.cancel()
         activeJobs.remove(key)
-
         _transfers.update { list ->
             list.map {
                 if (it.fileId == fileId && it.type == type &&
-                    (it.status == TransferStatus.IN_PROGRESS || it.status == TransferStatus.PENDING)
-                ) {
-                    it.copy(status = TransferStatus.PAUSED)
-                } else it
+                    (it.status == TransferStatus.IN_PROGRESS ||
+                            it.status == TransferStatus.PENDING)
+                ) it.copy(status = TransferStatus.PAUSED)
+                else it
             }
         }
     }
-
-    // ─── Resume ────────────────────────────────────────
 
     fun resumeTransfer(fileId: Long, type: TransferType) {
         if (type == TransferType.UPLOAD) {
-            // Re-enqueue the upload
-            val transfer = _transfers.value.find { it.fileId == fileId && it.type == TransferType.UPLOAD }
-                ?: return
-            // Remove old entry so it can be re-added
-            _transfers.update { list -> list.filter { !(it.fileId == fileId && it.type == TransferType.UPLOAD) } }
-
+            _transfers.update { list ->
+                list.filter { !(it.fileId == fileId && it.type == TransferType.UPLOAD) }
+            }
             val db = TgStorageApp.instance.database
             scope.launch {
                 val fileEntity = db.fileDao().getFileById(fileId) ?: return@launch
@@ -702,12 +758,8 @@ object TransferManager {
         }
     }
 
-    // ─── Retry failed ──────────────────────────────────
-
     fun retryTransfer(fileId: Long, type: TransferType) {
-        // Remove old failed entry
         _transfers.update { list -> list.filter { !(it.fileId == fileId && it.type == type) } }
-
         if (type == TransferType.UPLOAD) {
             val db = TgStorageApp.instance.database
             scope.launch {
@@ -717,52 +769,31 @@ object TransferManager {
         }
     }
 
-    // ─── Auto retry all failed ─────────────────────────
-
     fun retryAllFailed() {
         val failed = _transfers.value.filter { it.status == TransferStatus.FAILED }
-        for (transfer in failed) {
-            retryTransfer(transfer.fileId, transfer.type)
-        }
+        for (transfer in failed) retryTransfer(transfer.fileId, transfer.type)
     }
-
-    // ─── Pause all active transfers ────────────────────
 
     fun pauseAll() {
         val active = _transfers.value.filter {
             it.status == TransferStatus.IN_PROGRESS || it.status == TransferStatus.PENDING
         }
-        for (transfer in active) {
-            pauseTransfer(transfer.fileId, transfer.type)
-        }
-        // Also clear pending queue (they will become PAUSED in transfer list)
-        synchronized(queueLock) {
-            pendingUploadQueue.clear()
-        }
+        for (transfer in active) pauseTransfer(transfer.fileId, transfer.type)
+        scope.launch { queueMutex.withLock { uploadQueue.clear() } }
     }
-
-    // ─── Resume all paused transfers ───────────────────
 
     fun resumeAll() {
         val paused = _transfers.value.filter { it.status == TransferStatus.PAUSED }
-        for (transfer in paused) {
-            resumeTransfer(transfer.fileId, transfer.type)
-        }
+        for (transfer in paused) resumeTransfer(transfer.fileId, transfer.type)
     }
-
-    // ─── Check if any transfers can be paused ──────────
 
     fun hasActiveToPause(): Boolean =
         _transfers.value.any {
             it.status == TransferStatus.IN_PROGRESS || it.status == TransferStatus.PENDING
         }
 
-    // ─── Check if any transfers can be resumed ─────────
-
     fun hasPausedToResume(): Boolean =
         _transfers.value.any { it.status == TransferStatus.PAUSED }
-
-    // ─── Clear completed/failed from queue ─────────────
 
     fun clearFinished() {
         _transfers.update { list ->
@@ -781,18 +812,12 @@ object TransferManager {
 
     // ─── Auto-backup after N uploads ──────────────────
 
-    /**
-     * Increments the uploads-since-backup counter and triggers
-     * an automatic DB backup when the threshold is reached.
-     * Default threshold: 10 uploads.
-     */
     private suspend fun checkAutoBackupAfterUpload() {
         try {
             val app = TgStorageApp.instance
             val db = app.database
             val metadataDao = db.metadataDao()
 
-            // Increment counter
             val currentCount = (metadataDao.getValue(
                 com.tgstorage.data.local.entity.MetadataKeys.UPLOADS_SINCE_BACKUP
             )?.toIntOrNull() ?: 0) + 1
@@ -802,18 +827,16 @@ object TransferManager {
             )?.toIntOrNull() ?: 10
 
             if (currentCount >= threshold) {
-                // Reset counter and trigger backup
                 metadataDao.setValue(
                     com.tgstorage.data.local.entity.MetadataEntity(
                         key = com.tgstorage.data.local.entity.MetadataKeys.UPLOADS_SINCE_BACKUP,
                         value = "0"
                     )
                 )
-                android.util.Log.i("TransferManager", "Auto-backup triggered after $currentCount uploads")
+                Log.i(TAG, "Auto-backup triggered after $currentCount uploads")
                 val backupManager = com.tgstorage.data.sync.BackupManager(app)
                 backupManager.createAndUploadBackup()
             } else {
-                // Save updated counter
                 metadataDao.setValue(
                     com.tgstorage.data.local.entity.MetadataEntity(
                         key = com.tgstorage.data.local.entity.MetadataKeys.UPLOADS_SINCE_BACKUP,
@@ -822,8 +845,7 @@ object TransferManager {
                 )
             }
         } catch (e: Exception) {
-            // Never let backup logic crash the upload flow
-            android.util.Log.e("TransferManager", "Auto-backup check failed", e)
+            Log.e(TAG, "Auto-backup check failed", e)
         }
     }
 }
