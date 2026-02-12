@@ -391,16 +391,38 @@ object TransferManager {
             // Clean cache for this file
             cleanUploadCache(file.id)
 
-            // Trigger next batch
+            // CRITICAL: Force-update _transfers with final status from progressFlow.
+            // The collector coroutine is already cancelled at this point, so the last
+            // status (COMPLETED/FAILED) may NOT have propagated to _transfers yet.
+            // Without this, processNextBatch() sees stale IN_PROGRESS count and stalls.
+            val finalStatus = progressFlow.value.status
+            _transfers.update { list ->
+                list.map {
+                    if (it.fileId == file.id && it.type == TransferType.UPLOAD) progressFlow.value
+                    else it
+                }
+            }
+
+            Log.i(TAG, "Upload completed for '${file.name}' with status=$finalStatus, " +
+                    "queue=${uploadQueue.size}, active=${activeJobs.size}")
+
+            // Trigger next batch — now _transfers has correct state
             processNextBatch()
 
             // Auto-remove completed, trigger backup
-            val finalStatus = progressFlow.value.status
             if (finalStatus == TransferStatus.COMPLETED) {
                 scope.launch { checkAutoBackupAfterUpload() }
                 scope.launch {
                     delay(2000)
                     removeTransfer(file.id, TransferType.UPLOAD)
+                    // Safety net: trigger batch again after removal in case slots freed up
+                    processNextBatch()
+                }
+            } else if (finalStatus == TransferStatus.FAILED) {
+                // On failure, still try to start next files
+                scope.launch {
+                    delay(1000)
+                    processNextBatch()
                 }
             }
         }
@@ -809,6 +831,48 @@ object TransferManager {
         _transfers.value.any {
             it.status == TransferStatus.PENDING || it.status == TransferStatus.IN_PROGRESS
         }
+
+    // ─── Resume Pending Uploads ────────────────────────
+
+    /**
+     * Scans the DB for files with pending_upload sync state and re-enqueues them.
+     * Call this at app startup and periodically to ensure nothing stays stuck.
+     */
+    fun resumePendingUploads() {
+        scope.launch {
+            try {
+                val db = TgStorageApp.instance.database
+                val pendingStates = db.syncStateDao().getByStatusSync(
+                    com.tgstorage.data.local.entity.SyncStatus.PENDING_UPLOAD
+                )
+
+                if (pendingStates.isEmpty()) {
+                    Log.d(TAG, "No pending uploads to resume")
+                    return@launch
+                }
+
+                Log.i(TAG, "Resuming ${pendingStates.size} pending uploads from DB")
+
+                for (syncState in pendingStates) {
+                    val fileEntity = db.fileDao().getFileById(syncState.fileId) ?: continue
+                    // Only enqueue if not already active/queued
+                    val alreadyTracked = _transfers.value.any {
+                        it.fileId == fileEntity.id && it.type == TransferType.UPLOAD &&
+                                (it.status == TransferStatus.IN_PROGRESS ||
+                                 it.status == TransferStatus.PENDING)
+                    }
+                    val alreadyQueued = queueMutex.withLock {
+                        uploadQueue.any { it.id == fileEntity.id }
+                    }
+                    if (!alreadyTracked && !alreadyQueued && !activeJobs.containsKey(fileEntity.id)) {
+                        enqueueUpload(fileEntity)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to resume pending uploads", e)
+            }
+        }
+    }
 
     // ─── Auto-backup after N uploads ──────────────────
 
