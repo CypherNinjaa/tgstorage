@@ -88,6 +88,7 @@ object CryptoManager {
             val key = getOrCreateKey()
             val factory = SecretKeyFactory.getInstance(key.algorithm, ANDROID_KEYSTORE)
             val keyInfo = factory.getKeySpec(key, KeyInfo::class.java) as KeyInfo
+            @Suppress("DEPRECATION")
             keyInfo.isInsideSecureHardware
         } catch (_: Exception) {
             false

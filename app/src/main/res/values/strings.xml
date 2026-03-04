@@ -17,6 +17,7 @@
     <string name="upload_first_file">Upload your first file</string>
     <string name="coming_soon">Coming soon</string>
     <string name="error_generic">Something went wrong</string>
+    <string name="widget_description">Quick upload files to Telegram</string>
 
     <!-- Splash -->
     <string name="splash_welcome">Welcome to TgStorage</string>

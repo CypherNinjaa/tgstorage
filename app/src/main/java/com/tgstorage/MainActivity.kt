@@ -22,6 +22,7 @@ import com.tgstorage.data.transfer.TransferManager
 import com.tgstorage.data.updater.AppUpdater
 import com.tgstorage.data.sync.NewMediaWorker
 import com.tgstorage.data.repository.FileRepository
+import com.tgstorage.widget.QuickUploadWidget
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -98,6 +99,15 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val navController = rememberNavController()
                     AppShell(navController = navController)
+
+                    // Handle quick upload widget intent
+                    LaunchedEffect(Unit) {
+                        if (intent?.action == QuickUploadWidget.ACTION_QUICK_UPLOAD) {
+                            navController.navigate("upload") {
+                                launchSingleTop = true
+                            }
+                        }
+                    }
 
                     // Show update dialog when update is available
                     if (updateState is AppUpdater.UpdateState.UpdateAvailable) {

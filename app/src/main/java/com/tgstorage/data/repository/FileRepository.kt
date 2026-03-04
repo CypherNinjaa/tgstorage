@@ -124,12 +124,96 @@ class FileRepository(
     // ── Delete ─────────────────────────────────────────
 
     suspend fun deleteFile(fileEntity: FileEntity) = withContext(Dispatchers.IO) {
-        // Delete local copy
         fileEntity.localUri?.let { path ->
             val file = File(path)
             if (file.exists()) file.delete()
         }
         fileDao.deleteFile(fileEntity)
+    }
+
+    // ── Folder operations ──────────────────────────────
+
+    /** Move a file into a folder (null = root) */
+    suspend fun moveFileToFolder(fileId: Long, folderId: Long?) {
+        fileDao.moveToFolder(fileId, folderId)
+    }
+
+    /** Move multiple files into a folder */
+    suspend fun moveFilesToFolder(fileIds: List<Long>, folderId: Long?) {
+        fileDao.moveMultipleToFolder(fileIds, folderId)
+    }
+
+    // ── Trash / Recycle Bin ────────────────────────────
+
+    /** Soft-delete: move to trash */
+    suspend fun trashFile(fileId: Long) {
+        fileDao.moveToTrash(fileId)
+    }
+
+    /** Soft-delete multiple files */
+    suspend fun trashFiles(fileIds: List<Long>) {
+        fileDao.moveMultipleToTrash(fileIds)
+    }
+
+    /** Restore file from trash */
+    suspend fun restoreFile(fileId: Long) {
+        fileDao.restoreFromTrash(fileId)
+    }
+
+    /** Restore multiple files from trash */
+    suspend fun restoreFiles(fileIds: List<Long>) {
+        fileDao.restoreMultipleFromTrash(fileIds)
+    }
+
+    /** Get all trashed files */
+    fun getTrashedFiles(): Flow<List<FileEntity>> =
+        fileDao.getTrashedFiles()
+
+    /** Get trashed file count */
+    fun getTrashedCount(): Flow<Int> =
+        fileDao.getTrashedCount()
+
+    /**
+     * Permanently delete files trashed more than [days] ago.
+     * Returns number of files purged.
+     */
+    suspend fun purgeOldTrash(days: Int = 30): Int = withContext(Dispatchers.IO) {
+        val cutoff = System.currentTimeMillis() - days * 24L * 60 * 60 * 1000
+        val expired = fileDao.getTrashedFilesBefore(cutoff)
+        for (file in expired) {
+            file.localUri?.let { path ->
+                val f = File(path)
+                if (f.exists()) f.delete()
+            }
+            syncStateDao.deleteByFileId(file.id)
+            fileDao.deleteFile(file)
+        }
+        expired.size
+    }
+
+    /** Permanently delete a single trashed file */
+    suspend fun permanentlyDeleteFile(fileId: Long) = withContext(Dispatchers.IO) {
+        val file = fileDao.getFileById(fileId) ?: return@withContext
+        file.localUri?.let { path ->
+            val f = File(path)
+            if (f.exists()) f.delete()
+        }
+        syncStateDao.deleteByFileId(fileId)
+        fileDao.deleteFile(file)
+    }
+
+    /** Empty entire trash */
+    suspend fun emptyTrash(): Int = withContext(Dispatchers.IO) {
+        val allTrashed = fileDao.getAllFilesSync().filter { it.trashedAt != null }
+        for (file in allTrashed) {
+            file.localUri?.let { path ->
+                val f = File(path)
+                if (f.exists()) f.delete()
+            }
+            syncStateDao.deleteByFileId(file.id)
+            fileDao.deleteFile(file)
+        }
+        allTrashed.size
     }
 
     // ── Helpers ────────────────────────────────────────

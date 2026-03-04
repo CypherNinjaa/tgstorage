@@ -39,7 +39,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PauseCircle
 import androidx.compose.material.icons.filled.PlayArrow
@@ -1284,7 +1284,7 @@ private fun PreviewDialog(
                         Text("Download")
                     }
                     Button(onClick = onOpenExternal) {
-                        Icon(Icons.Filled.OpenInNew, null, Modifier.size(18.dp))
+                        Icon(Icons.AutoMirrored.Filled.OpenInNew, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
                         Text("Open")
                     }

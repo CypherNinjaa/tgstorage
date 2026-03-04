@@ -22,6 +22,7 @@ import androidx.compose.material.icons.outlined.Brush
 import androidx.compose.material.icons.outlined.Cached
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.CloudUpload
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lock
@@ -70,6 +71,8 @@ fun SettingsScreen(
     onNavigateToSync: () -> Unit,
     onNavigateToStats: () -> Unit,
     onNavigateToBotSettings: () -> Unit,
+    onNavigateToFolders: () -> Unit = {},
+    onNavigateToTrash: () -> Unit = {},
     viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.Factory),
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -267,6 +270,22 @@ fun SettingsScreen(
             item { HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp)) }
 
             item { SectionHeader("More") }
+            item {
+                SettingsItem(
+                    icon = Icons.Outlined.Folder,
+                    title = "Folders",
+                    subtitle = "Organize files into folders",
+                    onClick = onNavigateToFolders,
+                )
+            }
+            item {
+                SettingsItem(
+                    icon = Icons.Outlined.Delete,
+                    title = "Trash",
+                    subtitle = "Deleted files (auto-purged after 30 days)",
+                    onClick = onNavigateToTrash,
+                )
+            }
             item {
                 SettingsItem(
                     icon = Icons.Outlined.Backup,

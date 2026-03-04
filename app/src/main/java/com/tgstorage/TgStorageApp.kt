@@ -14,6 +14,7 @@ import com.tgstorage.data.sync.BackupWorker
 import com.tgstorage.data.sync.CleanupWorker
 import com.tgstorage.data.sync.NewMediaWorker
 import com.tgstorage.data.sync.SyncWorker
+import com.tgstorage.data.sync.TrashCleanupWorker
 import com.tgstorage.data.sync.UploadService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,6 +46,8 @@ class TgStorageApp : Application() {
                 TgStorageDatabase.MIGRATION_3_4,
                 TgStorageDatabase.MIGRATION_4_5,
                 TgStorageDatabase.MIGRATION_5_6,
+                TgStorageDatabase.MIGRATION_6_7,
+                TgStorageDatabase.MIGRATION_7_8,
             )
             .build()
 
@@ -102,6 +105,9 @@ class TgStorageApp : Application() {
 
         // Schedule new-media detection worker (checks for new photos/videos/docs every 15 min)
         NewMediaWorker.schedule(this)
+
+        // Schedule daily trash cleanup (purge files trashed > 30 days ago)
+        TrashCleanupWorker.schedule(this)
 
         // Restore auto-upload worker if it was enabled
         appScope.launch {

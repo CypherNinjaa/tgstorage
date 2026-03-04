@@ -29,6 +29,8 @@ sealed class Screen(val route: String) {
     data object Security : Screen("security")
     data object StorageStats : Screen("storage_stats")
     data object About : Screen("about")
+    data object Folders : Screen("folders")
+    data object Trash : Screen("trash")
 }
 
 data class BottomNavItem(

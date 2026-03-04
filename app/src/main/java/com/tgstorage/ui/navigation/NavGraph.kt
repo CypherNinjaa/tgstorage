@@ -14,6 +14,7 @@ import com.tgstorage.ui.about.AboutScreen
 import com.tgstorage.ui.backup.BackupRestoreScreen
 import com.tgstorage.ui.download.DownloadScreen
 import com.tgstorage.ui.filedetail.FileDetailScreen
+import com.tgstorage.ui.folders.FolderScreen
 import com.tgstorage.ui.home.HomeScreen
 import com.tgstorage.ui.lock.LockScreen
 import com.tgstorage.ui.onboarding.OnboardingScreen
@@ -24,6 +25,7 @@ import com.tgstorage.ui.splash.SplashScreen
 import com.tgstorage.ui.stats.StorageStatsScreen
 import com.tgstorage.ui.sync.SyncDashboardScreen
 import com.tgstorage.ui.transfers.TransferQueueScreen
+import com.tgstorage.ui.trash.TrashScreen
 import com.tgstorage.ui.upload.UploadScreen
 
 private const val NAV_ANIM_DURATION = 300
@@ -190,6 +192,8 @@ fun TgStorageNavGraph(
                 onNavigateToSync = { navController.navigate(Screen.SyncDashboard.route) },
                 onNavigateToStats = { navController.navigate(Screen.StorageStats.route) },
                 onNavigateToBotSettings = { navController.navigate(Screen.BotSettings.route) },
+                onNavigateToFolders = { navController.navigate(Screen.Folders.route) },
+                onNavigateToTrash = { navController.navigate(Screen.Trash.route) },
             )
         }
 
@@ -213,6 +217,18 @@ fun TgStorageNavGraph(
 
         composable(Screen.About.route) {
             AboutScreen(
+                onNavigateBack = { navController.popBackStack() },
+            )
+        }
+
+        composable(Screen.Folders.route) {
+            FolderScreen(
+                onNavigateBack = { navController.popBackStack() },
+            )
+        }
+
+        composable(Screen.Trash.route) {
+            TrashScreen(
                 onNavigateBack = { navController.popBackStack() },
             )
         }

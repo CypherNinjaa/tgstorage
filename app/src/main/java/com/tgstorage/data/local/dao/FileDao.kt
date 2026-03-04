@@ -221,4 +221,52 @@ interface FileDao {
         WHERE s.status = 'uploaded'
     """)
     fun getUploadedTotalSize(): Flow<Long>
+
+    // ── Folder queries ──────────────────────────────────
+
+    /** Get files in a specific folder (non-trashed only) */
+    @Query("SELECT * FROM files WHERE folder_id = :folderId AND trashed_at IS NULL ORDER BY updated_at DESC")
+    fun getFilesInFolder(folderId: Long): Flow<List<FileEntity>>
+
+    /** Get root files (no folder, non-trashed) */
+    @Query("SELECT * FROM files WHERE folder_id IS NULL AND trashed_at IS NULL ORDER BY updated_at DESC")
+    fun getRootFiles(): Flow<List<FileEntity>>
+
+    /** Move file to a folder */
+    @Query("UPDATE files SET folder_id = :folderId, updated_at = :now WHERE id = :fileId")
+    suspend fun moveToFolder(fileId: Long, folderId: Long?, now: Long = System.currentTimeMillis())
+
+    /** Move multiple files to a folder */
+    @Query("UPDATE files SET folder_id = :folderId, updated_at = :now WHERE id IN (:fileIds)")
+    suspend fun moveMultipleToFolder(fileIds: List<Long>, folderId: Long?, now: Long = System.currentTimeMillis())
+
+    // ── Trash / Recycle Bin ─────────────────────────────
+
+    /** Soft-delete: move to trash */
+    @Query("UPDATE files SET trashed_at = :now WHERE id = :fileId")
+    suspend fun moveToTrash(fileId: Long, now: Long = System.currentTimeMillis())
+
+    /** Soft-delete multiple files */
+    @Query("UPDATE files SET trashed_at = :now WHERE id IN (:fileIds)")
+    suspend fun moveMultipleToTrash(fileIds: List<Long>, now: Long = System.currentTimeMillis())
+
+    /** Restore from trash */
+    @Query("UPDATE files SET trashed_at = NULL WHERE id = :fileId")
+    suspend fun restoreFromTrash(fileId: Long)
+
+    /** Restore multiple from trash */
+    @Query("UPDATE files SET trashed_at = NULL WHERE id IN (:fileIds)")
+    suspend fun restoreMultipleFromTrash(fileIds: List<Long>)
+
+    /** Get all trashed files */
+    @Query("SELECT * FROM files WHERE trashed_at IS NOT NULL ORDER BY trashed_at DESC")
+    fun getTrashedFiles(): Flow<List<FileEntity>>
+
+    /** Get trashed files older than given timestamp (for auto-purge) */
+    @Query("SELECT * FROM files WHERE trashed_at IS NOT NULL AND trashed_at < :cutoff")
+    suspend fun getTrashedFilesBefore(cutoff: Long): List<FileEntity>
+
+    /** Count trashed files */
+    @Query("SELECT COUNT(*) FROM files WHERE trashed_at IS NOT NULL")
+    fun getTrashedCount(): Flow<Int>
 }

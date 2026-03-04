@@ -7,6 +7,8 @@ import androidx.lifecycle.viewModelScope
 import com.tgstorage.TgStorageApp
 import com.tgstorage.common.NetworkMonitor
 import com.tgstorage.data.local.dao.MetadataDao
+import com.tgstorage.data.local.dao.FolderDao
+import com.tgstorage.data.local.entity.FolderEntity
 import com.tgstorage.data.local.entity.MetadataEntity
 import com.tgstorage.data.local.entity.MetadataKeys
 import com.tgstorage.data.repository.FileRepository
@@ -91,10 +93,18 @@ class HomeViewModel(
     private val repository: FileRepository,
     private val networkMonitor: NetworkMonitor,
     private val metadataDao: MetadataDao,
+    private val folderDao: FolderDao,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
+
+    /** All folders for the move-to-folder picker */
+    val folders: StateFlow<List<FolderEntity>> = MutableStateFlow<List<FolderEntity>>(emptyList()).also { flow ->
+        viewModelScope.launch {
+            folderDao.getAllFolders().collect { list -> (flow as MutableStateFlow).value = list }
+        }
+    }
 
     private var autoUploadJob: Job? = null
     private var searchJob: Job? = null
@@ -114,7 +124,8 @@ class HomeViewModel(
                 val repository = FileRepository(app, db.fileDao(), db.syncStateDao())
                 val networkMonitor = NetworkMonitor(app)
                 val metadataDao = db.metadataDao()
-                return HomeViewModel(scanner, repository, networkMonitor, metadataDao) as T
+                val folderDao = db.folderDao()
+                return HomeViewModel(scanner, repository, networkMonitor, metadataDao, folderDao) as T
             }
         }
     }
@@ -267,6 +278,37 @@ class HomeViewModel(
 
     fun clearSelection() {
         _uiState.update { it.copy(selectedIds = emptySet(), selectionMode = false) }
+    }
+
+    // ── Move selected to folder ────────────────────────
+
+    fun moveSelectedToFolder(folderId: Long) {
+        val selectedIds = _uiState.value.selectedIds.toList()
+        if (selectedIds.isEmpty()) return
+
+        viewModelScope.launch {
+            // First import selected device files to Room DB if not already there,
+            // then move them to the folder
+            val state = _uiState.value
+            val selected = state.deviceFiles.filter { it.id in state.selectedIds }
+
+            for (file in selected) {
+                // Import to Room if needed, then move
+                repository.importFile(file.contentUri)
+                    .onSuccess { entity ->
+                        repository.moveFileToFolder(entity.id, folderId)
+                    }
+            }
+
+            val folderName = folderDao.getById(folderId)?.name ?: "folder"
+            _uiState.update {
+                it.copy(
+                    selectedIds = emptySet(),
+                    selectionMode = false,
+                    message = "${selected.size} file(s) moved to $folderName",
+                )
+            }
+        }
     }
 
     // ── Upload selected files (batched, memory-safe) ──

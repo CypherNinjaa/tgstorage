@@ -1,6 +1,7 @@
 package com.tgstorage.ui.home
 
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -9,6 +10,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,19 +40,23 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PlayCircleOutline
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.CloudUpload
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -63,6 +69,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SearchBar
 import androidx.compose.material3.SearchBarDefaults
@@ -103,6 +110,7 @@ import coil.request.ImageRequest
 import com.tgstorage.data.scanner.DeviceFile
 import com.tgstorage.ui.components.ErrorState
 import com.tgstorage.ui.components.LoadingState
+import com.tgstorage.ui.viewer.MediaViewerScreen
 import com.tgstorage.util.StoragePermissionHelper
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -122,6 +130,14 @@ fun HomeScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var infoFile by remember { mutableStateOf<DeviceFile?>(null) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    // Media viewer state
+    var mediaViewerFiles by remember { mutableStateOf<List<DeviceFile>>(emptyList()) }
+    var mediaViewerIndex by remember { mutableStateOf(0) }
+    var showMediaViewer by remember { mutableStateOf(false) }
+
+    // Move-to-folder dialog state
+    var showMoveToFolderDialog by remember { mutableStateOf(false) }
 
     // ── Permission handling (using modern StoragePermissionHelper) ─────────────
     val permissionsToRequest = StoragePermissionHelper.getMediaPermissions()
@@ -211,6 +227,15 @@ fun HomeScreen(
                         IconButton(onClick = viewModel::uploadSelected) {
                             Icon(Icons.Filled.CloudUpload, "Upload selected",
                                 tint = MaterialTheme.colorScheme.primary)
+                        }
+                        IconButton(onClick = {
+                            shareMultipleFiles(context, state.deviceFiles.filter { it.id in state.selectedIds })
+                            viewModel.clearSelection()
+                        }) {
+                            Icon(Icons.Filled.Share, "Share selected")
+                        }
+                        IconButton(onClick = { showMoveToFolderDialog = true }) {
+                            Icon(Icons.AutoMirrored.Filled.DriveFileMove, "Move to folder")
                         }
                     },
                 )
@@ -427,9 +452,20 @@ fun HomeScreen(
                         uploadedNames = state.uploadedNames,
                         hasMoreFiles = state.hasMoreFiles,
                         isLoadingMore = state.isLoadingMore,
-                        onTap = {
-                            if (state.selectionMode) viewModel.toggleSelection(it.id)
-                            else infoFile = it
+                        onTap = { file ->
+                            if (state.selectionMode) {
+                                viewModel.toggleSelection(file.id)
+                            } else if (file.mimeType.startsWith("image/") || file.mimeType.startsWith("video/")) {
+                                // Open media viewer for images & videos
+                                val mediaFiles = state.deviceFiles.filter {
+                                    it.mimeType.startsWith("image/") || it.mimeType.startsWith("video/")
+                                }
+                                mediaViewerFiles = mediaFiles
+                                mediaViewerIndex = mediaFiles.indexOfFirst { it.id == file.id }.coerceAtLeast(0)
+                                showMediaViewer = true
+                            } else {
+                                infoFile = file
+                            }
                         },
                         onLongPress = { viewModel.toggleSelection(it.id) },
                         onLoadMore = viewModel::loadMoreFiles,
@@ -442,9 +478,19 @@ fun HomeScreen(
                         uploadedNames = state.uploadedNames,
                         hasMoreFiles = state.hasMoreFiles,
                         isLoadingMore = state.isLoadingMore,
-                        onTap = {
-                            if (state.selectionMode) viewModel.toggleSelection(it.id)
-                            else infoFile = it
+                        onTap = { file ->
+                            if (state.selectionMode) {
+                                viewModel.toggleSelection(file.id)
+                            } else if (file.mimeType.startsWith("image/") || file.mimeType.startsWith("video/")) {
+                                val mediaFiles = state.deviceFiles.filter {
+                                    it.mimeType.startsWith("image/") || it.mimeType.startsWith("video/")
+                                }
+                                mediaViewerFiles = mediaFiles
+                                mediaViewerIndex = mediaFiles.indexOfFirst { it.id == file.id }.coerceAtLeast(0)
+                                showMediaViewer = true
+                            } else {
+                                infoFile = file
+                            }
                         },
                         onLongPress = { viewModel.toggleSelection(it.id) },
                         onLoadMore = viewModel::loadMoreFiles,
@@ -462,9 +508,35 @@ fun HomeScreen(
             DeviceFileInfoSheet(
                 file = infoFile!!,
                 onOpen = { openDeviceFile(context, infoFile!!) { noAppToast = true }; infoFile = null },
+                onShare = {
+                    shareFile(context, infoFile!!)
+                    infoFile = null
+                },
                 onClose = { infoFile = null },
             )
         }
+    }
+
+    // ── Media viewer overlay ────────────────────────────
+    if (showMediaViewer && mediaViewerFiles.isNotEmpty()) {
+        MediaViewerScreen(
+            files = mediaViewerFiles,
+            initialIndex = mediaViewerIndex,
+            onBack = { showMediaViewer = false },
+            onShare = { file -> shareFile(context, file) },
+        )
+    }
+
+    // ── Move to folder dialog ───────────────────────────
+    if (showMoveToFolderDialog) {
+        MoveToFolderDialog(
+            viewModel = viewModel,
+            onDismiss = { showMoveToFolderDialog = false },
+            onMoved = {
+                showMoveToFolderDialog = false
+                viewModel.clearSelection()
+            },
+        )
     }
 }
 
@@ -795,6 +867,7 @@ private fun DeviceFileList(
 private fun DeviceFileInfoSheet(
     file: DeviceFile,
     onOpen: () -> Unit,
+    onShare: () -> Unit,
     onClose: () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp)) {
@@ -835,9 +908,16 @@ private fun DeviceFileInfoSheet(
             ) {
                 Text("Open")
             }
+            Button(
+                onClick = onShare,
+                modifier = Modifier.weight(1f),
+            ) {
+                Icon(Icons.Filled.Share, contentDescription = null, Modifier.size(18.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Share")
+            }
             TextButton(
                 onClick = onClose,
-                modifier = Modifier.weight(1f),
             ) {
                 Text("Close")
             }
@@ -913,4 +993,102 @@ private fun groupFilesByDate(files: List<DeviceFile>): List<Pair<String, List<De
             }
         }
         .toList()
+}
+
+// ─── Share helpers ─────────────────────────────────────
+
+private fun shareFile(context: android.content.Context, file: DeviceFile) {
+    try {
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = file.mimeType
+            putExtra(Intent.EXTRA_STREAM, file.contentUri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "Share ${file.name}"))
+    } catch (_: Exception) { /* no app to handle */ }
+}
+
+private fun shareMultipleFiles(context: android.content.Context, files: List<DeviceFile>) {
+    if (files.isEmpty()) return
+    if (files.size == 1) {
+        shareFile(context, files.first())
+        return
+    }
+    try {
+        val uris = ArrayList(files.map { it.contentUri })
+        val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = "*/*"
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "Share ${files.size} files"))
+    } catch (_: Exception) { /* no app to handle */ }
+}
+
+// ─── Move to folder dialog ─────────────────────────────
+
+@Composable
+private fun MoveToFolderDialog(
+    viewModel: HomeViewModel,
+    onDismiss: () -> Unit,
+    onMoved: () -> Unit,
+) {
+    val folders by viewModel.folders.collectAsState()
+    var selectedFolderId by remember { mutableStateOf<Long?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Move to Folder") },
+        text = {
+            if (folders.isEmpty()) {
+                Column(
+                    Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        "No folders yet",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Create folders from Settings → Folders",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                LazyColumn {
+                    items(folders) { folder ->
+                        ListItem(
+                            headlineContent = { Text(folder.name) },
+                            leadingContent = {
+                                RadioButton(
+                                    selected = selectedFolderId == folder.id,
+                                    onClick = { selectedFolderId = folder.id },
+                                )
+                            },
+                            modifier = Modifier.clickable { selectedFolderId = folder.id },
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    selectedFolderId?.let { folderId ->
+                        viewModel.moveSelectedToFolder(folderId)
+                        onMoved()
+                    }
+                },
+                enabled = selectedFolderId != null,
+            ) {
+                Text("Move")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
