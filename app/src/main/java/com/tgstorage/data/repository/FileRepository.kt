@@ -63,6 +63,14 @@ class FileRepository(
             val (displayName, fileSize) = resolveFileMetadata(uri)
             val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
 
+            // Reject ghost/invalid files — 0 bytes or unresolvable name
+            if (fileSize <= 0L) {
+                throw IllegalArgumentException("Cannot import file with 0 bytes: $displayName ($uri)")
+            }
+            if (displayName == "unknown" || displayName.isBlank()) {
+                throw IllegalArgumentException("Cannot resolve file name from URI: $uri")
+            }
+
             // Store the URI directly - NO COPY
             // SHA-256 will be computed during upload to avoid double-read
             val entity = FileEntity(
@@ -126,16 +134,38 @@ class FileRepository(
 
     // ── Helpers ────────────────────────────────────────
 
+    /**
+     * Purge ghost entries: files in DB with name "unknown" / blank or size 0.
+     * Also removes their sync_state rows.
+     * Call once at app startup to clean up historical ghosts.
+     */
+    suspend fun cleanupGhostFiles(): Int = withContext(Dispatchers.IO) {
+        val ghosts = fileDao.getAllFilesSync().filter { file ->
+            file.size <= 0L ||
+            file.name.isBlank() ||
+            file.name.equals("unknown", ignoreCase = true)
+        }
+        for (ghost in ghosts) {
+            syncStateDao.deleteByFileId(ghost.id)
+            fileDao.deleteFile(ghost)
+        }
+        ghosts.size
+    }
+
     private fun resolveFileMetadata(uri: Uri): Pair<String, Long> {
         var name = "unknown"
         var size = 0L
-        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
-                if (nameIdx >= 0) name = cursor.getString(nameIdx) ?: "unknown"
-                if (sizeIdx >= 0) size = cursor.getLong(sizeIdx)
+        try {
+            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (nameIdx >= 0) name = cursor.getString(nameIdx) ?: "unknown"
+                    if (sizeIdx >= 0) size = cursor.getLong(sizeIdx)
+                }
             }
+        } catch (_: Exception) {
+            // SecurityException, stale URI, etc. — leave defaults
         }
         return name to size
     }

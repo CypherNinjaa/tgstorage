@@ -9,6 +9,7 @@ import com.tgstorage.data.local.entity.MetadataKeys
 import com.tgstorage.data.repository.SyncRepository
 import com.tgstorage.data.repository.TelegramRepository
 import com.tgstorage.data.sync.SyncWorker
+import com.tgstorage.data.transfer.TransferManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,6 +39,8 @@ data class SettingsUiState(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val dynamicColor: Boolean = true,
     val appLockEnabled: Boolean = false,
+    val batchSizePerBot: Int = 0, // 0 = auto
+    val detectedBatchSize: Int = 2, // what auto would pick
     val message: String? = null,
     val error: String? = null,
 )
@@ -57,6 +60,7 @@ class SettingsViewModel(
         observePreferences()
         refreshAccount()
         refreshStorageSizes()
+        loadBatchSizeSetting()
     }
 
     fun toggleTokenVisibility() {
@@ -122,6 +126,37 @@ class SettingsViewModel(
             }
             metadataDao.setValue(MetadataEntity(MetadataKeys.APP_LOCK_ENABLED, enabled.toString()))
             _uiState.update { it.copy(appLockEnabled = enabled, message = if (enabled) "App lock enabled" else "App lock disabled") }
+        }
+    }
+
+    private fun loadBatchSizeSetting() {
+        viewModelScope.launch {
+            val raw = metadataDao.getValue(MetadataKeys.BATCH_SIZE_PER_BOT)
+            val userPref = raw?.toIntOrNull() ?: 0
+            val autoDetected = TransferManager.detectDeviceBatchSize()
+            _uiState.update {
+                it.copy(
+                    batchSizePerBot = userPref,
+                    detectedBatchSize = autoDetected,
+                )
+            }
+        }
+    }
+
+    /**
+     * Set files-per-bot batch size.
+     * @param perBot 0 = auto (device capability), 1-10 = manual override
+     */
+    fun setBatchSizePerBot(perBot: Int) {
+        viewModelScope.launch {
+            metadataDao.setValue(MetadataEntity(MetadataKeys.BATCH_SIZE_PER_BOT, perBot.toString()))
+            _uiState.update {
+                it.copy(
+                    batchSizePerBot = perBot,
+                    message = if (perBot == 0) "Batch size: Auto (${_uiState.value.detectedBatchSize}/bot)"
+                    else "Batch size: $perBot files per bot",
+                )
+            }
         }
     }
 
@@ -231,6 +266,8 @@ class SettingsViewModel(
                     themeMode = themeMode,
                     dynamicColor = dynamic,
                     appLockEnabled = appLockEnabled,
+                    batchSizePerBot = _uiState.value.batchSizePerBot,
+                    detectedBatchSize = _uiState.value.detectedBatchSize,
                     isLoading = false,
                     message = _uiState.value.message,
                     error = _uiState.value.error,

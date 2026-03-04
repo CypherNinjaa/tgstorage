@@ -12,7 +12,9 @@ import com.tgstorage.data.sync.AutoBackupWorker
 import com.tgstorage.data.sync.AutoRetryWorker
 import com.tgstorage.data.sync.BackupWorker
 import com.tgstorage.data.sync.CleanupWorker
+import com.tgstorage.data.sync.NewMediaWorker
 import com.tgstorage.data.sync.SyncWorker
+import com.tgstorage.data.sync.UploadService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -49,6 +51,8 @@ class TgStorageApp : Application() {
         // Create notification channels
         SyncWorker.createNotificationChannel(this)
         BackupWorker.createNotificationChannel(this)
+        UploadService.createNotificationChannel(this)
+        NewMediaWorker.createNotificationChannel(this)
 
         // Migrate legacy single-bot to multi-bot table
         appScope.launch {
@@ -95,6 +99,9 @@ class TgStorageApp : Application() {
 
         // Schedule auto-retry worker to automatically retry failed uploads
         AutoRetryWorker.schedule(this)
+
+        // Schedule new-media detection worker (checks for new photos/videos/docs every 15 min)
+        NewMediaWorker.schedule(this)
 
         // Restore auto-upload worker if it was enabled
         appScope.launch {

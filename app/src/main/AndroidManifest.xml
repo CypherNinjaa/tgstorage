@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- ════════════════════════════════════════════════════════════════════════
          STORAGE PERMISSIONS — Modern Scoped Storage Compatible (Android 11-14)
@@ -63,6 +64,12 @@
         <!-- WorkManager foreground service — must declare foregroundServiceType for SDK 34+ -->
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+
+        <!-- Upload foreground service — keeps uploads alive when app is closed -->
+        <service
+            android:name=".data.sync.UploadService"
             android:foregroundServiceType="dataSync"
             android:exported="false" />
     </application>

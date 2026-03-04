@@ -12,10 +12,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.Backup
 import androidx.compose.material.icons.outlined.Brush
 import androidx.compose.material.icons.outlined.Cached
@@ -27,8 +28,11 @@ import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.PieChart
 import androidx.compose.material.icons.outlined.Security
+import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.SmartToy
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -203,6 +207,18 @@ fun SettingsScreen(
                     onCheckedChange = viewModel::setSyncWifiOnly,
                 )
             }
+            item {
+                val currentLabel = if (state.batchSizePerBot == 0) {
+                    "Auto (${state.detectedBatchSize} files/bot)"
+                } else {
+                    "${state.batchSizePerBot} files/bot"
+                }
+                BatchSizeRow(
+                    currentLabel = currentLabel,
+                    selected = state.batchSizePerBot,
+                    onSelect = viewModel::setBatchSizePerBot,
+                )
+            }
             item { HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp)) }
 
             item { SectionHeader("Security") }
@@ -339,6 +355,66 @@ private fun ThemeModeSelector(
             ) {
                 Text(mode.label, style = MaterialTheme.typography.bodyMedium)
                 RadioButton(selected = mode == selected, onClick = { onSelect(mode) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun BatchSizeRow(
+    currentLabel: String,
+    selected: Int,
+    onSelect: (Int) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val options = listOf(
+        0 to "Auto (device capability)",
+        1 to "1 file per bot (low memory)",
+        2 to "2 files per bot",
+        3 to "3 files per bot",
+        4 to "4 files per bot",
+        5 to "5 files per bot",
+        8 to "8 files per bot (high-end)",
+        10 to "10 files per bot",
+    )
+
+    Column {
+        ListItem(
+            headlineContent = {
+                Text("Batch Size", style = MaterialTheme.typography.bodyLarge)
+            },
+            supportingContent = {
+                Text(currentLabel, style = MaterialTheme.typography.bodyMedium)
+            },
+            leadingContent = {
+                Icon(
+                    imageVector = Icons.Outlined.Speed,
+                    contentDescription = null,
+                )
+            },
+            modifier = Modifier.clickable { expanded = true },
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            options.forEach { (value, label) ->
+                DropdownMenuItem(
+                    text = { Text(label) },
+                    onClick = {
+                        onSelect(value)
+                        expanded = false
+                    },
+                    leadingIcon = {
+                        if (value == selected) {
+                            Icon(
+                                Icons.Filled.Check,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    },
+                )
             }
         }
     }

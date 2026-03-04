@@ -22,9 +22,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -33,6 +35,7 @@ import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -60,6 +63,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -147,9 +151,11 @@ fun OnboardingScreen(
                         isVerified = state.isChannelVerified,
                         detectedChannels = state.detectedChannels,
                         isDetectingChannels = state.isDetectingChannels,
+                        detectAttempt = state.detectAttempt,
                         onChannelIdChange = viewModel::updateChannelId,
-                        onVerify = viewModel::verifyChannel,
                         onSelectChannel = viewModel::selectDetectedChannel,
+                        onVerifyManual = viewModel::verifyManualChannelId,
+                        onRetryDetect = viewModel::retryDetectChannels,
                         onBack = viewModel::previousStep,
                     )
                     3 -> BackupRestoreStep(
@@ -401,9 +407,11 @@ private fun VerifyChannelStep(
     isVerified: Boolean,
     detectedChannels: List<com.tgstorage.data.remote.DetectedChannel>,
     isDetectingChannels: Boolean,
+    detectAttempt: Int,
     onChannelIdChange: (String) -> Unit,
-    onVerify: () -> Unit,
     onSelectChannel: (com.tgstorage.data.remote.DetectedChannel) -> Unit,
+    onVerifyManual: () -> Unit,
+    onRetryDetect: () -> Unit,
     onBack: () -> Unit,
 ) {
     Column(
@@ -425,7 +433,7 @@ private fun VerifyChannelStep(
         Spacer(modifier = Modifier.height(24.dp))
 
         Text(
-            text = "Verify Channel",
+            text = "Connect Channel",
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold,
         )
@@ -433,50 +441,65 @@ private fun VerifyChannelStep(
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
-            text = if (detectedChannels.isNotEmpty()) "We found your channel! Tap to select it."
-            else "Enter the channel ID or username where your bot is admin",
+            text = when {
+                isLoading -> "Verifying channel..."
+                detectedChannels.isNotEmpty() -> "We found your channel! Tap to connect."
+                isDetectingChannels -> "Listening for channel_post updates..."
+                else -> "Add the bot as admin & send a message in your channel"
+            },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(24.dp))
 
-        // ── Detected channels ──
-        if (isDetectingChannels) {
+        // ── Auto-detecting animation ──
+        if (isDetectingChannels && detectedChannels.isEmpty()) {
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
                 ),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(36.dp),
+                        strokeWidth = 3.dp,
                     )
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        text = "Looking for your channels...",
+                        text = "Waiting for a channel_post from your bot...",
                         style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Attempt $detectAttempt — long-polling every 5s",
+                        style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Send any message in the channel so the bot can detect it",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
                     )
                 }
             }
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(16.dp))
         }
 
+        // ── Detected channels ──
         if (detectedChannels.isNotEmpty()) {
             detectedChannels.forEach { channel ->
-                val isSelected = channelId == channel.id.toString()
                 Card(
                     onClick = { onSelectChannel(channel) },
                     colors = CardDefaults.cardColors(
-                        containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer
-                        else MaterialTheme.colorScheme.surfaceContainerLow,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
                     ),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -485,11 +508,9 @@ private fun VerifyChannelStep(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(
-                            imageVector = if (channel.type == "channel") Icons.Outlined.Forum
-                            else Icons.Outlined.Forum,
+                            imageVector = Icons.Outlined.Forum,
                             contentDescription = null,
-                            tint = if (isSelected) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            tint = MaterialTheme.colorScheme.primary,
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
@@ -505,64 +526,75 @@ private fun VerifyChannelStep(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        if (isSelected) {
-                            Icon(
-                                imageVector = Icons.Filled.CheckCircle,
-                                contentDescription = "Selected",
-                                tint = MaterialTheme.colorScheme.primary,
-                            )
-                        }
+                        Icon(
+                            imageVector = Icons.Filled.ChevronRight,
+                            contentDescription = "Select",
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
                     }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
             }
-            Spacer(modifier = Modifier.height(4.dp))
         }
 
-        // ── Manual input ──
-        OutlinedTextField(
-            value = channelId,
-            onValueChange = onChannelIdChange,
-            label = { Text(if (detectedChannels.isNotEmpty()) "Or enter manually" else "Channel ID or @username") },
-            placeholder = { Text("@my_storage_channel or -100123456789") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            isError = error != null,
-            supportingText = if (error != null) {
-                { Text(text = error, color = MaterialTheme.colorScheme.error) }
-            } else null,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = { onVerify() }),
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant,
-            ),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "Setup Instructions:",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "1. Create a private channel in Telegram\n" +
-                            "2. Go to channel settings → Administrators\n" +
-                            "3. Add your bot as admin with message permissions\n" +
-                            "4. Tap your channel above or enter the ID manually",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+        // ── Loading (verifying selected channel) ──
+        if (isLoading) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "Verifying channel access...",
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                }
             }
+            Spacer(modifier = Modifier.height(12.dp))
         }
 
+        // ── Error with retry ──
+        if (error != null) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = onRetryDetect,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                        ),
+                    ) {
+                        Icon(Icons.Filled.Refresh, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Retry Detection")
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+
+        // ── Verified success ──
         if (isVerified) {
-            Spacer(modifier = Modifier.height(16.dp))
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -580,7 +612,7 @@ private fun VerifyChannelStep(
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                     Text(
-                        text = "Channel verified successfully!",
+                        text = "Channel connected successfully!",
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold,
                     )
@@ -588,31 +620,82 @@ private fun VerifyChannelStep(
             }
         }
 
-        Spacer(modifier = Modifier.weight(1f))
+        Spacer(modifier = Modifier.height(16.dp))
 
-        Row(modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(
-                onClick = onBack,
-                modifier = Modifier.weight(1f),
-            ) {
-                Text("Back")
-            }
-            Spacer(modifier = Modifier.width(12.dp))
-            Button(
-                onClick = onVerify,
-                modifier = Modifier.weight(1f),
-                enabled = channelId.isNotBlank() && !isLoading,
-            ) {
-                if (isLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                } else {
+        // ── Manual channel ID input (fallback) ──
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Or enter Channel ID manually:",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = channelId,
+                    onValueChange = onChannelIdChange,
+                    label = { Text("Channel ID") },
+                    placeholder = { Text("-1001234567890") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Done,
+                    ),
+                    keyboardActions = KeyboardActions(onDone = { onVerifyManual() }),
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = onVerifyManual,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = channelId.isNotBlank() && !isLoading,
+                ) {
                     Text("Verify Channel")
                 }
             }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // ── Setup instructions ──
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Setup Instructions:",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "1. Create a private channel in Telegram\n" +
+                            "2. Go to channel settings \u2192 Administrators\n" +
+                            "3. Add your bot as admin with message permissions\n" +
+                            "4. Send any message in the channel\n" +
+                            "5. The app auto-detects via channel_post, or enter ID manually",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+
+        // ── Back button ──
+        OutlinedButton(
+            onClick = onBack,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Back")
         }
     }
 }

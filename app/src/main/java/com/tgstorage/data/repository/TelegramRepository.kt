@@ -90,19 +90,29 @@ class TelegramRepository(
     ): Result<TelegramMessage> = api.sendDocument(token, chatId, file, fileName)
 
     /**
-     * Auto-detect channels/groups the bot has access to via getUpdates.
+     * Auto-detect channels/groups the bot has access to via getUpdates with long-polling.
      * Extracts chats from ALL update types:
      *  - my_chat_member: bot was added/promoted (one-shot, expires 24h)
      *  - channel_post: any post in a channel where the bot is admin
      *  - message: any message in a group/supergroup the bot can see
-     * This is much more reliable than relying on my_chat_member alone.
+     *
+     * @param offset Pass the last known updateId + 1 to skip old updates and wait for new ones.
+     * @return Pair of (detected channels, highest updateId seen) so caller can advance offset.
      */
-    suspend fun detectChannels(token: String): List<DetectedChannel> {
-        val updates = api.getUpdates(token).getOrNull() ?: return emptyList()
+    suspend fun detectChannels(
+        token: String,
+        offset: Long = 0,
+    ): Pair<List<DetectedChannel>, Long> {
+        val updates = api.getUpdates(token, offset = offset, timeout = 5)
+            .getOrNull() ?: return Pair(emptyList(), offset)
+
         val validTypes = setOf("channel", "supergroup", "group")
         val detectedChats = mutableMapOf<Long, DetectedChannel>()
+        var maxUpdateId = offset - 1
 
         for (update in updates) {
+            if (update.updateId > maxUpdateId) maxUpdateId = update.updateId
+
             // 1. From my_chat_member — bot was added/promoted
             update.myChatMember?.let { member ->
                 val chat = member.chat
@@ -151,6 +161,8 @@ class TelegramRepository(
             }
         }
 
-        return detectedChats.values.toList()
+        // Return maxUpdateId + 1 as next offset to acknowledge these updates
+        val nextOffset = if (maxUpdateId >= offset) maxUpdateId + 1 else offset
+        return Pair(detectedChats.values.toList(), nextOffset)
     }
 }

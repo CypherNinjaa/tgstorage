@@ -38,6 +38,7 @@ object MetadataKeys {
     const val AUTO_RETRY_ENABLED = "auto_retry_enabled" // true/false — auto retry failed uploads
     const val UPLOADS_SINCE_BACKUP = "uploads_since_backup" // counter: triggers auto-backup every N uploads
     const val AUTO_BACKUP_THRESHOLD = "auto_backup_threshold" // number of uploads before auto-backup (default: 10)
+    const val BATCH_SIZE_PER_BOT = "batch_size_per_bot" // files per bot per batch (0 = auto, default: 0)
 }
 
 /** Backup frequency options. */

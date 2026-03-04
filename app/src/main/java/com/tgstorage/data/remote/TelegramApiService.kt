@@ -332,26 +332,47 @@ class TelegramApiService {
     }
 
     /**
-     * POST /getUpdates — fetches recent updates.
+     * POST /getUpdates — fetches recent updates using long-polling.
      * Used to auto-detect channels the bot has been added to.
-     * Uses POST with JSON body to properly serialize the allowed_updates array.
+     *
+     * @param offset If > 0, only return updates with update_id >= offset.
+     *               Pass lastUpdateId + 1 to acknowledge previous updates.
+     * @param timeout Long-poll seconds (0 = immediate, default 5).
+     *                The server holds the connection until an update arrives or timeout elapses.
+     * @param allowedUpdates Which update types to receive. Defaults to channel_post + message + my_chat_member.
      */
     suspend fun getUpdates(
         token: String,
+        offset: Long = 0,
+        timeout: Int = 5,
+        allowedUpdates: List<String> = listOf("channel_post", "message", "my_chat_member"),
     ): Result<List<TelegramUpdate>> = withContext(Dispatchers.IO) {
         runCatching {
-            // Request all default update types (includes message, channel_post, my_chat_member)
-            // Don't pass allowed_updates — defaults include everything except
-            // chat_member, message_reaction, message_reaction_count
-            val jsonBody = "{}"
+            val bodyMap = buildMap<String, kotlinx.serialization.json.JsonElement> {
+                put("timeout", kotlinx.serialization.json.JsonPrimitive(timeout))
+                put("allowed_updates", kotlinx.serialization.json.JsonArray(
+                    allowedUpdates.map { kotlinx.serialization.json.JsonPrimitive(it) }
+                ))
+                if (offset > 0) {
+                    put("offset", kotlinx.serialization.json.JsonPrimitive(offset))
+                }
+            }
+            val jsonBody = json.encodeToString(
+                kotlinx.serialization.json.JsonObject.serializer(),
+                kotlinx.serialization.json.JsonObject(bodyMap),
+            )
             val requestBody = jsonBody.toRequestBody(
                 "application/json; charset=utf-8".toMediaType(),
             )
+            // Use a longer OkHttp timeout for long-polling
+            val longPollClient = client.newBuilder()
+                .readTimeout((timeout + 5).toLong(), java.util.concurrent.TimeUnit.SECONDS)
+                .build()
             val request = Request.Builder()
                 .url("${BASE_URL}${token}/getUpdates")
                 .post(requestBody)
                 .build()
-            val responseBody = client.newCall(request).await()
+            val responseBody = longPollClient.newCall(request).await()
             val resp = json.decodeFromString<TelegramResponse<List<TelegramUpdate>>>(responseBody)
             if (resp.ok && resp.result != null) resp.result
             else throw TelegramApiException(resp.description ?: "getUpdates failed", resp.errorCode)

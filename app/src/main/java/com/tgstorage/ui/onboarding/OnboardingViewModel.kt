@@ -12,6 +12,7 @@ import com.tgstorage.data.remote.TelegramUser
 import com.tgstorage.data.repository.TelegramRepository
 import com.tgstorage.data.sync.BackupInfo
 import com.tgstorage.data.sync.BackupManager
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,6 +33,7 @@ data class OnboardingUiState(
     // Channel auto-detection
     val detectedChannels: List<DetectedChannel> = emptyList(),
     val isDetectingChannels: Boolean = false,
+    val detectAttempt: Int = 0,
     // Backup restore
     val backupInfo: BackupInfo? = null,
     val isSearchingBackup: Boolean = false,
@@ -46,6 +48,11 @@ class OnboardingViewModel(
 
     private val _uiState = MutableStateFlow(OnboardingUiState())
     val uiState: StateFlow<OnboardingUiState> = _uiState.asStateFlow()
+
+    private var detectJob: Job? = null
+    private var detectOffset: Long = 0 // tracks getUpdates offset for long-polling
+    private val DETECT_POLL_TIMEOUT = 5 // seconds for long-poll
+    private val MAX_DETECT_ATTEMPTS = 24 // ~2 minutes (each attempt = 5s long-poll)
 
     fun nextStep() {
         _uiState.update { it.copy(currentStep = (it.currentStep + 1).coerceAtMost(3), error = null) }
@@ -106,15 +113,14 @@ class OnboardingViewModel(
 
     fun verifyChannel() {
         val token = _uiState.value.botToken.trim()
-        var chatId = _uiState.value.channelId.trim()
+        val chatId = _uiState.value.channelId.trim()
         if (chatId.isBlank()) {
-            _uiState.update { it.copy(error = "Please enter your channel ID") }
+            _uiState.update { it.copy(error = "No channel selected yet") }
             return
         }
-        // Auto-prefix with @ if it looks like a username (not numeric/starting with -)
-        if (!chatId.startsWith("@") && !chatId.startsWith("-") && chatId.toLongOrNull() == null) {
-            chatId = "@$chatId"
-        }
+
+        // Stop polling once we start verifying
+        detectJob?.cancel()
 
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
@@ -148,25 +154,152 @@ class OnboardingViewModel(
     }
 
     /**
-     * Select a channel from the auto-detected list and populate the channel ID field.
+     * Select a channel from the auto-detected list.
+     * Auto-verifies immediately — no manual "Verify" button needed.
      */
     fun selectDetectedChannel(channel: DetectedChannel) {
         _uiState.update {
             it.copy(channelId = channel.id.toString(), error = null)
         }
+        // Auto-verify the selected channel immediately
+        verifyChannel()
     }
 
+    /**
+     * Polls getUpdates with long-polling + offset tracking.
+     * Each call blocks ~5s waiting for new updates from Telegram.
+     *
+     * When a channel is detected (from my_chat_member, channel_post, or message),
+     * the bot AUTOMATICALLY sends a test message to verify admin permissions.
+     * If verification succeeds → auto-proceeds. No user action needed.
+     *
+     * If the user added the bot as admin, just wait — the bot will detect
+     * my_chat_member, send a test message, and auto-verify.
+     */
     private fun detectChannels() {
+        detectJob?.cancel()
+        detectOffset = 0 // reset offset for fresh detection
         val token = _uiState.value.botToken.trim()
-        viewModelScope.launch {
-            val channels = repository.detectChannels(token)
+        detectJob = viewModelScope.launch {
+            // First, drain any old updates by calling with offset=0
+            val (oldChannels, initialOffset) = repository.detectChannels(token, offset = 0)
+            detectOffset = initialOffset
+
+            // If old pending updates already contain channels, try auto-verify immediately
+            if (oldChannels.isNotEmpty()) {
+                _uiState.update {
+                    it.copy(
+                        detectedChannels = oldChannels,
+                        isDetectingChannels = true,
+                    )
+                }
+                // Try to verify each channel by sending a test message
+                for (ch in oldChannels) {
+                    val result = repository.verifyChannel(token, ch.id.toString())
+                    if (result.isSuccess) {
+                        // Bot successfully sent message → channel verified!
+                        val resolvedChatId = result.getOrNull()?.chat?.id?.toString()
+                            ?: ch.id.toString()
+                        repository.saveChatId(resolvedChatId)
+                        _uiState.update {
+                            it.copy(
+                                isDetectingChannels = false,
+                                isChannelVerified = true,
+                                channelId = resolvedChatId,
+                                error = null,
+                                currentStep = 3,
+                                isSearchingBackup = true,
+                            )
+                        }
+                        searchForBackup()
+                        return@launch
+                    }
+                }
+                // None verified — show them but continue polling
+            }
+
+            var attempts = 0
+            val allDetected = mutableMapOf<Long, com.tgstorage.data.remote.DetectedChannel>()
+            for (ch in oldChannels) allDetected[ch.id] = ch
+
+            while (attempts < MAX_DETECT_ATTEMPTS) {
+                attempts++
+                _uiState.update { it.copy(isDetectingChannels = true, detectAttempt = attempts) }
+
+                val (channels, nextOffset) = repository.detectChannels(token, offset = detectOffset)
+                detectOffset = nextOffset
+
+                // Accumulate detected channels across polls
+                for (ch in channels) {
+                    allDetected[ch.id] = ch
+                }
+
+                // Try auto-verify each newly detected channel
+                if (channels.isNotEmpty()) {
+                    _uiState.update {
+                        it.copy(detectedChannels = allDetected.values.toList())
+                    }
+                    for (ch in channels) {
+                        val result = repository.verifyChannel(token, ch.id.toString())
+                        if (result.isSuccess) {
+                            // Bot sent test message → auto-verified!
+                            val resolvedChatId = result.getOrNull()?.chat?.id?.toString()
+                                ?: ch.id.toString()
+                            repository.saveChatId(resolvedChatId)
+                            _uiState.update {
+                                it.copy(
+                                    isDetectingChannels = false,
+                                    isChannelVerified = true,
+                                    channelId = resolvedChatId,
+                                    error = null,
+                                    currentStep = 3,
+                                    isSearchingBackup = true,
+                                )
+                            }
+                            searchForBackup()
+                            return@launch
+                        }
+                    }
+                }
+
+                // No verified channel yet — long-poll handles the wait (~5s)
+            }
+
+            // Exhausted attempts — show what we found (if any) + manual fallback
             _uiState.update {
                 it.copy(
-                    detectedChannels = channels,
                     isDetectingChannels = false,
+                    detectedChannels = allDetected.values.toList(),
+                    error = "Could not auto-detect a verified channel. " +
+                            "Make sure the bot is admin with message permissions, " +
+                            "or enter the Channel ID manually below.",
                 )
             }
         }
+    }
+
+    /**
+     * Manually restart channel detection polling.
+     */
+    fun retryDetectChannels() {
+        _uiState.update { it.copy(error = null, detectedChannels = emptyList()) }
+        detectOffset = 0
+        detectChannels()
+    }
+
+    /**
+     * Verify a manually entered channel ID.
+     */
+    fun verifyManualChannelId() {
+        val chatId = _uiState.value.channelId.trim()
+        if (chatId.isBlank()) {
+            _uiState.update { it.copy(error = "Please enter a channel ID") }
+            return
+        }
+        // Stop any running detection
+        detectJob?.cancel()
+        _uiState.update { it.copy(isDetectingChannels = false) }
+        verifyChannel()
     }
 
     private fun searchForBackup() {

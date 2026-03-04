@@ -15,11 +15,13 @@ import com.tgstorage.data.scanner.DeviceFileScanner
 import com.tgstorage.data.sync.AutoBackupWorker
 import com.tgstorage.data.transfer.TransferManager
 import com.tgstorage.data.transfer.TransferStatus
+import com.tgstorage.data.transfer.TransferType
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -61,7 +63,26 @@ data class HomeUiState(
     val message: String? = null,
     val isImporting: Boolean = false,
     val activeUploads: Int = 0,
+    // Batch progress (auto-upload)
+    val batchProgress: BatchProgress? = null,
 )
+
+/**
+ * Tracks batch-by-batch auto-upload progress.
+ */
+data class BatchProgress(
+    val currentBatch: Int,
+    val totalBatches: Int,
+    val uploadedFiles: Int,
+    val failedFiles: Int,
+    val totalFiles: Int,
+    val batchSize: Int,
+) {
+    /** Files remaining = total - uploaded - failed */
+    val remainingFiles: Int get() = (totalFiles - uploadedFiles - failedFiles).coerceAtLeast(0)
+    /** Overall progress fraction (0.0 .. 1.0) */
+    val progress: Float get() = if (totalFiles > 0) (uploadedFiles + failedFiles).toFloat() / totalFiles else 0f
+}
 
 // ── ViewModel ──────────────────────────────────────────
 
@@ -248,32 +269,132 @@ class HomeViewModel(
         _uiState.update { it.copy(selectedIds = emptySet(), selectionMode = false) }
     }
 
-    // ── Upload selected files ──────────────────────────
+    // ── Upload selected files (batched, memory-safe) ──
 
     fun uploadSelected() {
         val state = _uiState.value
         val selected = state.deviceFiles.filter { it.id in state.selectedIds }
         if (selected.isEmpty()) return
 
-        _uiState.update { it.copy(isImporting = true, message = null, selectionMode = false, selectedIds = emptySet()) }
+        // Filter out already-uploaded
+        val toUpload = selected.filter { it.name !in state.uploadedNames }
 
+        _uiState.update {
+            it.copy(
+                isImporting = false,
+                message = null,
+                selectionMode = false,
+                selectedIds = emptySet(),
+            )
+        }
+
+        if (toUpload.isEmpty()) {
+            _uiState.update { it.copy(message = "All selected files already uploaded!") }
+            return
+        }
+
+        // Use the same batched pipeline as auto-upload
         viewModelScope.launch {
-            var ok = 0; var fail = 0
-            for (file in selected) {
-                // Skip already-uploaded files
-                if (file.name in state.uploadedNames) { ok++; continue }
+            val batchSize = TransferManager.getOptimalBatchSize()
+            val totalFiles = toUpload.size
+            val batches = toUpload.chunked(batchSize)
+            val totalBatches = batches.size
+            var uploaded = 0
+            var failed = 0
 
-                repository.importFile(file.contentUri)
-                    .onSuccess { entity -> ok++; TransferManager.enqueueUpload(entity) }
-                    .onFailure { fail++ }
+            // Show batch progress if more than one batch needed
+            if (totalBatches > 1) {
+                _uiState.update {
+                    it.copy(
+                        batchProgress = BatchProgress(
+                            currentBatch = 1,
+                            totalBatches = totalBatches,
+                            uploadedFiles = 0,
+                            failedFiles = 0,
+                            totalFiles = totalFiles,
+                            batchSize = batchSize,
+                        ),
+                    )
+                }
             }
+
+            for ((batchIndex, batch) in batches.withIndex()) {
+                val currentBatchNum = batchIndex + 1
+                val enqueuedIds = mutableSetOf<Long>()
+
+                for (file in batch) {
+                    repository.importFile(file.contentUri)
+                        .onSuccess { entity ->
+                            enqueuedIds.add(entity.id)
+                            TransferManager.enqueueUpload(entity)
+                        }
+                        .onFailure { failed++ }
+                }
+
+                if (enqueuedIds.isEmpty()) continue
+
+                // Update batch progress
+                if (totalBatches > 1) {
+                    _uiState.update {
+                        it.copy(
+                            batchProgress = BatchProgress(
+                                currentBatch = currentBatchNum,
+                                totalBatches = totalBatches,
+                                uploadedFiles = uploaded,
+                                failedFiles = failed,
+                                totalFiles = totalFiles,
+                                batchSize = batchSize,
+                            ),
+                        )
+                    }
+                }
+
+                // Wait for batch to complete
+                TransferManager.transfers.first { list ->
+                    val stillActive = list.any { tp ->
+                        tp.fileId in enqueuedIds &&
+                                tp.type == TransferType.UPLOAD &&
+                                (tp.status == TransferStatus.IN_PROGRESS ||
+                                 tp.status == TransferStatus.PENDING)
+                    }
+                    !stillActive
+                }
+
+                // Count results
+                val batchResults = TransferManager.transfers.value.filter {
+                    it.fileId in enqueuedIds && it.type == TransferType.UPLOAD
+                }
+                uploaded += batchResults.count { it.status == TransferStatus.COMPLETED }
+                failed += batchResults.count { it.status == TransferStatus.FAILED }
+
+                // Update progress
+                if (totalBatches > 1) {
+                    _uiState.update {
+                        it.copy(
+                            batchProgress = BatchProgress(
+                                currentBatch = currentBatchNum,
+                                totalBatches = totalBatches,
+                                uploadedFiles = uploaded,
+                                failedFiles = failed,
+                                totalFiles = totalFiles,
+                                batchSize = batchSize,
+                            ),
+                        )
+                    }
+                }
+
+                // Force-clear memory
+                TransferManager.forceCleanCompletedTransfers()
+                delay(200)
+            }
+
             _uiState.update {
                 it.copy(
-                    isImporting = false,
+                    batchProgress = null,
                     message = when {
-                        fail == 0 -> "$ok file(s) queued for upload!"
-                        ok == 0 -> "Failed to import $fail file(s)"
-                        else -> "$ok queued, $fail failed"
+                        failed == 0 -> "$uploaded file(s) uploaded successfully!"
+                        uploaded == 0 -> "Failed to upload $failed file(s)"
+                        else -> "$uploaded uploaded, $failed failed"
                     },
                 )
             }
@@ -303,14 +424,13 @@ class HomeViewModel(
             AutoBackupWorker.cancel(app)
             autoUploadJob?.cancel()
             autoUploadJob = null
-            _uiState.update { it.copy(message = "Auto-upload stopped") }
+            _uiState.update { it.copy(message = "Auto-upload stopped", batchProgress = null) }
         }
     }
 
     private fun startAutoUpload() {
         autoUploadJob?.cancel()
         autoUploadJob = viewModelScope.launch {
-            // Show progress message but don't block UI
             _uiState.update { it.copy(message = "Checking for new files...") }
 
             // Get all files efficiently (uses cache if available)
@@ -319,36 +439,113 @@ class HomeViewModel(
             val toUpload = allFiles.filter { it.name !in uploadedNames }
 
             if (toUpload.isEmpty()) {
-                _uiState.update { it.copy(message = "All files already uploaded!") }
+                _uiState.update { it.copy(message = "All files already uploaded!", batchProgress = null) }
                 return@launch
             }
 
-            // Don't show importing spinner, just queue in background
-            _uiState.update {
-                it.copy(message = "Queueing ${toUpload.size} file(s) for upload...")
-            }
+            // ── BATCHED PIPELINE: 2 files per bot, upload, clear, repeat ──
+            val batchSize = TransferManager.getOptimalBatchSize()
+            val totalFiles = toUpload.size
+            val batches = toUpload.chunked(batchSize)
+            val totalBatches = batches.size
+            var uploaded = 0
+            var failed = 0
 
-            // Batch processing - import in smaller batches to avoid blocking
-            var ok = 0; var fail = 0
-            val batchSize = 10
-            for (batch in toUpload.chunked(batchSize)) {
-                if (!_uiState.value.autoUpload) break // User turned off
-
-                for (file in batch) {
-                    repository.importFile(file.contentUri)
-                        .onSuccess { entity -> ok++; TransferManager.enqueueUpload(entity) }
-                        .onFailure { fail++ }
-                }
-                // Small delay between batches to keep UI responsive
-                delay(50)
-            }
-
+            // Show initial batch progress
             _uiState.update {
                 it.copy(
+                    batchProgress = BatchProgress(
+                        currentBatch = 1,
+                        totalBatches = totalBatches,
+                        uploadedFiles = 0,
+                        failedFiles = 0,
+                        totalFiles = totalFiles,
+                        batchSize = batchSize,
+                    ),
+                    message = null,
+                )
+            }
+
+            for ((batchIndex, batch) in batches.withIndex()) {
+                if (!_uiState.value.autoUpload) break // User turned off
+
+                val currentBatchNum = batchIndex + 1
+                val enqueuedIds = mutableSetOf<Long>()
+
+                // Step 1: Import & enqueue only this small batch
+                for (file in batch) {
+                    if (!_uiState.value.autoUpload) break
+                    repository.importFile(file.contentUri)
+                        .onSuccess { entity ->
+                            enqueuedIds.add(entity.id)
+                            TransferManager.enqueueUpload(entity)
+                        }
+                        .onFailure { failed++ }
+                }
+
+                if (enqueuedIds.isEmpty()) continue
+
+                // Update batch progress
+                _uiState.update {
+                    it.copy(
+                        batchProgress = BatchProgress(
+                            currentBatch = currentBatchNum,
+                            totalBatches = totalBatches,
+                            uploadedFiles = uploaded,
+                            failedFiles = failed,
+                            totalFiles = totalFiles,
+                            batchSize = batchSize,
+                        ),
+                    )
+                }
+
+                // Step 2: Wait for this entire batch to finish uploading
+                TransferManager.transfers.first { list ->
+                    val stillActive = list.any { tp ->
+                        tp.fileId in enqueuedIds &&
+                                tp.type == TransferType.UPLOAD &&
+                                (tp.status == TransferStatus.IN_PROGRESS ||
+                                 tp.status == TransferStatus.PENDING)
+                    }
+                    !stillActive
+                }
+
+                // Count results from this batch
+                val batchResults = TransferManager.transfers.value.filter {
+                    it.fileId in enqueuedIds && it.type == TransferType.UPLOAD
+                }
+                uploaded += batchResults.count { it.status == TransferStatus.COMPLETED }
+                failed += batchResults.count { it.status == TransferStatus.FAILED }
+
+                // Update progress after batch completes
+                _uiState.update {
+                    it.copy(
+                        batchProgress = BatchProgress(
+                            currentBatch = currentBatchNum,
+                            totalBatches = totalBatches,
+                            uploadedFiles = uploaded,
+                            failedFiles = failed,
+                            totalFiles = totalFiles,
+                            batchSize = batchSize,
+                        ),
+                    )
+                }
+
+                // Step 3: Force-clear completed transfers from memory
+                TransferManager.forceCleanCompletedTransfers()
+
+                // Give GC a chance
+                delay(200)
+            }
+
+            // Clear batch progress, show final message
+            _uiState.update {
+                it.copy(
+                    batchProgress = null,
                     message = when {
-                        fail == 0 -> "$ok file(s) queued for auto-upload!"
-                        ok == 0 -> "Failed to import $fail file(s)"
-                        else -> "$ok queued, $fail failed"
+                        failed == 0 -> "$uploaded file(s) uploaded successfully!"
+                        uploaded == 0 -> "Failed to upload $failed file(s)"
+                        else -> "$uploaded uploaded, $failed failed"
                     },
                 )
             }

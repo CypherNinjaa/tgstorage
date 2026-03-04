@@ -1,14 +1,18 @@
 package com.tgstorage.data.transfer
 
+import android.app.ActivityManager
+import android.content.Context
 import android.net.Uri
 import android.util.Log
 import com.tgstorage.TgStorageApp
 import com.tgstorage.data.local.entity.FileEntity
 import com.tgstorage.data.local.entity.BotEntity
+import com.tgstorage.data.local.entity.MetadataKeys
 import com.tgstorage.data.remote.TelegramApiService
 import com.tgstorage.data.remote.TokenValidator
 import com.tgstorage.data.repository.BotRepository
 import com.tgstorage.data.repository.TelegramRepository
+import com.tgstorage.data.sync.UploadService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -166,6 +170,11 @@ object TransferManager {
      */
     fun enqueueUpload(file: FileEntity) {
         if (activeJobs.containsKey(file.id)) return
+        // Reject ghost/invalid files
+        if (file.size <= 0L || file.name.isBlank() || file.name.equals("unknown", ignoreCase = true)) {
+            Log.w(TAG, "Rejected ghost file from upload queue: '${file.name}' (${file.size} bytes)")
+            return
+        }
 
         scope.launch {
             val alreadyQueued = queueMutex.withLock { uploadQueue.any { it.id == file.id } }
@@ -190,6 +199,9 @@ object TransferManager {
                     )
                 } else current
             }
+
+            // Start foreground service to keep uploads alive in background
+            try { UploadService.start(TgStorageApp.instance) } catch (_: Exception) {}
 
             // Trigger batch processing
             processNextBatch()
@@ -831,6 +843,262 @@ object TransferManager {
         _transfers.value.any {
             it.status == TransferStatus.PENDING || it.status == TransferStatus.IN_PROGRESS
         }
+
+    // ─── Batched Upload API (memory-safe) ──────────────
+
+    /**
+     * Returns the number of active bots (for calculating batch size).
+     */
+    suspend fun getActiveBotCount(): Int {
+        refreshActiveBots()
+        return cachedActiveBots.size.coerceAtLeast(1)
+    }
+
+    /**
+     * Calculate the optimal batch size (files per batch) based on:
+     * 1. User setting (BATCH_SIZE_PER_BOT) — if set to > 0, use it directly
+     * 2. Auto mode (value = 0 or not set) — detect device capability
+     *
+     * Device capability levels:
+     * - Low RAM (< 3 GB):    1 file per bot
+     * - Medium (3–6 GB):     2 files per bot
+     * - High (6–8 GB):       3 files per bot
+     * - Ultra (> 8 GB):      4 files per bot
+     */
+    suspend fun getOptimalBatchSize(): Int {
+        val botCount = getActiveBotCount()
+        val perBot = getUserBatchSizePerBot()
+        return perBot * botCount
+    }
+
+    /**
+     * Gets the user-configured files per bot, or auto-detects from device RAM.
+     */
+    suspend fun getUserBatchSizePerBot(): Int {
+        val app = TgStorageApp.instance
+        val metadataDao = app.database.metadataDao()
+        val raw = metadataDao.getValue(MetadataKeys.BATCH_SIZE_PER_BOT)
+        val userPref = raw?.toIntOrNull() ?: 0
+
+        return if (userPref > 0) {
+            userPref
+        } else {
+            detectDeviceBatchSize()
+        }
+    }
+
+    /**
+     * Auto-detect files per bot based on device RAM.
+     */
+    fun detectDeviceBatchSize(): Int {
+        val app = TgStorageApp.instance
+        val activityManager = app.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val memInfo = ActivityManager.MemoryInfo()
+        activityManager.getMemoryInfo(memInfo)
+        val totalRamGb = memInfo.totalMem / (1024.0 * 1024.0 * 1024.0)
+
+        return when {
+            totalRamGb < 3.0 -> 1
+            totalRamGb < 6.0 -> 2
+            totalRamGb < 8.0 -> 3
+            else -> 4
+        }
+    }
+
+    /**
+     * Suspends until ALL of the given file IDs have finished uploading
+     * (COMPLETED, FAILED, or CANCELLED — anything that isn't active/pending).
+     */
+    suspend fun awaitBatchCompletion(fileIds: Set<Long>) {
+        if (fileIds.isEmpty()) return
+        // Poll _transfers until none of the fileIds are still in-progress/pending
+        _transfers.collect { list ->
+            val stillActive = list.any { tp ->
+                tp.fileId in fileIds &&
+                        tp.type == TransferType.UPLOAD &&
+                        (tp.status == TransferStatus.IN_PROGRESS ||
+                         tp.status == TransferStatus.PENDING)
+            }
+            if (!stillActive) {
+                // All done — flow collect will stop via the caller's scope
+                return@collect
+            }
+        }
+    }
+
+    /**
+     * Force-remove all COMPLETED / FAILED / CANCELLED uploads from _transfers.
+     * Frees memory for the next batch.
+     */
+    fun forceCleanCompletedTransfers() {
+        _transfers.update { list ->
+            list.filter {
+                it.type == TransferType.DOWNLOAD ||
+                        (it.status == TransferStatus.IN_PROGRESS ||
+                         it.status == TransferStatus.PENDING ||
+                         it.status == TransferStatus.PAUSED)
+            }
+        }
+        // Also clear the upload queue defensively
+        scope.launch {
+            queueMutex.withLock {
+                uploadQueue.clear()
+            }
+        }
+        Log.i(TAG, "Force-cleaned completed transfers from memory")
+    }
+
+    /**
+     * Remove ghost entries (0-byte / "unknown" name) from the in-memory transfer list.
+     * Also removes them from the upload queue.
+     */
+    fun purgeGhostTransfers() {
+        val removed = mutableListOf<String>()
+        _transfers.update { list ->
+            list.filter { transfer ->
+                val isGhost = transfer.totalBytes <= 0L ||
+                        transfer.fileName.isBlank() ||
+                        transfer.fileName.equals("unknown", ignoreCase = true)
+                if (isGhost) {
+                    removed.add("'${transfer.fileName}' (${transfer.fileId})")
+                    activeJobs[transfer.fileId]?.cancel()
+                    activeJobs.remove(transfer.fileId)
+                }
+                !isGhost
+            }
+        }
+        scope.launch {
+            queueMutex.withLock {
+                uploadQueue.removeAll { it.size <= 0L || it.name.isBlank() || it.name.equals("unknown", ignoreCase = true) }
+            }
+        }
+        if (removed.isNotEmpty()) {
+            Log.i(TAG, "Purged ${removed.size} ghost transfers: $removed")
+        }
+    }
+
+    // ─── Stall Watchdog ────────────────────────────────
+
+    /**
+     * Tracks the last known transferred bytes for each active upload.
+     * If bytes haven't changed for STALL_TIMEOUT_MS, the upload is considered stuck.
+     */
+    private val lastProgressSnapshot = mutableMapOf<Long, Pair<Long, Long>>() // fileId → (transferredBytes, timestampMs)
+    private var watchdogJob: Job? = null
+    private const val STALL_CHECK_INTERVAL_MS = 15_000L  // check every 15s
+    private const val STALL_TIMEOUT_MS = 60_000L         // stuck if no progress for 60s
+    private const val MAX_STALL_RETRIES = 3              // max retries before giving up
+    private val stallRetryCount = mutableMapOf<Long, Int>() // fileId → retries
+
+    /**
+     * Start the stall watchdog. Call once at app startup.
+     * Periodically checks all IN_PROGRESS uploads.
+     * If any upload has made no byte progress for STALL_TIMEOUT_MS,
+     * it cancels the job and re-enqueues the file.
+     */
+    fun startStallWatchdog() {
+        if (watchdogJob?.isActive == true) return
+        watchdogJob = scope.launch {
+            Log.i(TAG, "Stall watchdog started")
+            while (true) {
+                delay(STALL_CHECK_INTERVAL_MS)
+                checkForStalledUploads()
+            }
+        }
+    }
+
+    private suspend fun checkForStalledUploads() {
+        val now = System.currentTimeMillis()
+        val activeUploads = _transfers.value.filter {
+            it.type == TransferType.UPLOAD && it.status == TransferStatus.IN_PROGRESS
+        }
+
+        for (transfer in activeUploads) {
+            val fileId = transfer.fileId
+            val currentBytes = transfer.bytesTransferred
+
+            val existing = lastProgressSnapshot[fileId]
+            if (existing == null) {
+                // First time seeing this upload — record snapshot
+                lastProgressSnapshot[fileId] = currentBytes to now
+                continue
+            }
+            val (lastBytes, lastTime) = existing
+
+            if (currentBytes > lastBytes) {
+                // Progress was made — update snapshot, reset retry count
+                lastProgressSnapshot[fileId] = currentBytes to now
+                stallRetryCount.remove(fileId)
+            } else if (now - lastTime > STALL_TIMEOUT_MS) {
+                // No progress for STALL_TIMEOUT_MS — stalled!
+                val retries = stallRetryCount.getOrDefault(fileId, 0)
+                if (retries >= MAX_STALL_RETRIES) {
+                    Log.e(TAG, "Upload '${transfer.fileName}' stalled $MAX_STALL_RETRIES times — marking FAILED")
+                    activeJobs[fileId]?.cancel()
+                    _transfers.update { list ->
+                        list.map {
+                            if (it.fileId == fileId && it.type == TransferType.UPLOAD) {
+                                it.copy(
+                                    status = TransferStatus.FAILED,
+                                    error = "Upload stalled after $MAX_STALL_RETRIES retries",
+                                )
+                            } else it
+                        }
+                    }
+                    lastProgressSnapshot.remove(fileId)
+                    stallRetryCount.remove(fileId)
+                } else {
+                    Log.w(TAG, "Upload '${transfer.fileName}' stalled (${retries + 1}/$MAX_STALL_RETRIES) — restarting")
+                    stallRetryCount[fileId] = retries + 1
+                    restartStalledUpload(fileId)
+                }
+            }
+        }
+
+        // Clean up snapshots for uploads that are no longer active
+        val activeIds = activeUploads.map { it.fileId }.toSet()
+        lastProgressSnapshot.keys.removeAll { it !in activeIds }
+        stallRetryCount.keys.removeAll { it !in activeIds }
+    }
+
+    private suspend fun restartStalledUpload(fileId: Long) {
+        // Cancel the stuck job
+        activeJobs[fileId]?.cancel()
+        activeJobs.remove(fileId)
+
+        // Clean up temp files from the failed attempt
+        cleanUploadCache(fileId)
+
+        // Get the file entity from DB to re-enqueue
+        val db = TgStorageApp.instance.database
+        val fileEntity = db.fileDao().getFileById(fileId)
+
+        if (fileEntity != null) {
+            // Remove old transfer entry
+            _transfers.update { list ->
+                list.filter { !(it.fileId == fileId && it.type == TransferType.UPLOAD) }
+            }
+
+            // Small delay before re-enqueue
+            delay(1_000)
+
+            // Re-enqueue — this creates a fresh transfer entry + triggers processNextBatch
+            Log.i(TAG, "Re-enqueueing stalled upload: '${fileEntity.name}'")
+            enqueueUpload(fileEntity)
+        } else {
+            Log.e(TAG, "Cannot restart stalled upload $fileId — file not found in DB")
+            _transfers.update { list ->
+                list.map {
+                    if (it.fileId == fileId && it.type == TransferType.UPLOAD) {
+                        it.copy(status = TransferStatus.FAILED, error = "File not found in database")
+                    } else it
+                }
+            }
+        }
+
+        // Reset the progress snapshot for fresh tracking
+        lastProgressSnapshot.remove(fileId)
+    }
 
     // ─── Resume Pending Uploads ────────────────────────
 
